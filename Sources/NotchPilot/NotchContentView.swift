@@ -20,22 +20,13 @@ struct NotchContentView: View {
     @State private var collapseTask: Task<Void, Never>?
 
     /// Set true while the buddy is doing an "idle peek" — a brief
-    /// random eye-open while pinned in always-visible mode. Drives both
-    /// the buddy mode and the right-side status text.
+    /// random eye-open while pinned in always-visible mode.
     @State private var idlePeekActive = false
-    @State private var idleMessage = "zzz…"
     @State private var idlePeekTask: Task<Void, Never>?
 
-    private static let idleMessages: [String] = [
-        "zzz…",
-        "snoozin",
-        "standby",
-        "ready",
-        "waiting",
-        "all clear",
-        "lurking",
-        "idle",
-    ]
+    /// Currently hovered heatmap cell (0-23) or nil. Drives the
+    /// header tooltip + cell highlight.
+    @State private var hoveredHeatmapHour: Int?
     // Synchronously-controlled visibility. Set to true the moment activity
     // appears; only set back to false after the fade-out delay elapses with
     // no fresh activity. Decoupled from `hasAnyActivity` so we don't race
@@ -133,10 +124,10 @@ struct NotchContentView: View {
         if mouseMonitor.isHoveringNotch {
             return "hi"
         }
-        // Pinned-but-idle: rotate through cute idle messages so the
-        // buddy doesn't look frozen on always-visible mode.
+        // Pinned-but-idle: simple "zzz…" so the buddy doesn't look
+        // frozen on always-visible mode.
         if prefs.alwaysVisible && !hasAnyActivity {
-            return idleMessage
+            return "zzz…"
         }
         return ""
     }
@@ -285,10 +276,6 @@ struct NotchContentView: View {
                     && !mouseMonitor.isHoveringNotch
                     && !expanded
                 guard canPeek else { continue }
-
-                // Rotate to a fresh idle message right before the peek
-                // so the user sees both eyes open AND new text.
-                idleMessage = Self.idleMessages.randomElement() ?? "zzz…"
 
                 withAnimation(.easeOut(duration: 0.45)) {
                     idlePeekActive = true
@@ -605,10 +592,16 @@ struct NotchContentView: View {
             HStack {
                 sectionLabel("Today", count: nil)
                 Spacer()
-                Text("\(heatmap.totalToday) events")
+                // Header text doubles as a heatmap tooltip — when no
+                // cell is hovered it shows the day's total; when one
+                // is hovered it shows that hour's count.
+                Text(heatmapHeaderText)
                     .font(.system(size: 9, weight: .medium, design: .rounded))
-                    .foregroundColor(.white.opacity(0.4))
+                    .foregroundColor(
+                        hoveredHeatmapHour != nil ? accent : .white.opacity(0.4)
+                    )
                     .monospacedDigit()
+                    .animation(.easeOut(duration: 0.12), value: hoveredHeatmapHour)
             }
 
             heatmapStrip
@@ -628,6 +621,51 @@ struct NotchContentView: View {
                     .frame(maxWidth: .infinity)
                 }
             }
+
+            // Per-hour project breakdown — fixed-height row so the
+            // section doesn't reflow when you hover. Empty when no
+            // cell is hovered, populated with the projects that had
+            // events in that hour.
+            heatmapProjectRow
+                .frame(height: 14)
+        }
+    }
+
+    @ViewBuilder
+    private var heatmapProjectRow: some View {
+        if let hour = hoveredHeatmapHour {
+            let projects = heatmap.projects(forHour: hour)
+            if projects.isEmpty {
+                Text("no projects")
+                    .font(.system(size: 9, design: .rounded))
+                    .foregroundColor(.white.opacity(0.3))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(projects, id: \.name) { entry in
+                            HStack(spacing: 4) {
+                                Circle()
+                                    .fill(accent)
+                                    .frame(width: 5, height: 5)
+                                Text(entry.name)
+                                    .font(.system(size: 10, weight: .medium, design: .rounded))
+                                    .foregroundColor(.white.opacity(0.85))
+                                Text("·")
+                                    .font(.system(size: 10, design: .rounded))
+                                    .foregroundColor(.white.opacity(0.3))
+                                Text("\(entry.count)")
+                                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                                    .foregroundColor(.white.opacity(0.6))
+                                    .monospacedDigit()
+                            }
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        } else {
+            Color.clear
         }
     }
 
@@ -639,22 +677,45 @@ struct NotchContentView: View {
             ForEach(0..<24, id: \.self) { hour in
                 let count = heatmap.hourlyCounts[hour]
                 let intensity = Double(count) / Double(maxCount)
+                let isHovered = hoveredHeatmapHour == hour
                 RoundedRectangle(cornerRadius: 3, style: .continuous)
                     .fill(
                         cellColor(intensity: intensity, isCurrent: hour == currentHour)
                     )
                     .frame(height: 22)
                     .overlay(
-                        // Thin outline on the "now" cell
+                        // Outline: hovered cell gets a bright border;
+                        // current hour gets a subtle accent border.
                         RoundedRectangle(cornerRadius: 3)
                             .strokeBorder(
-                                hour == currentHour ? accent : .clear,
-                                lineWidth: 1
+                                isHovered
+                                    ? Color.white.opacity(0.85)
+                                    : (hour == currentHour ? accent : .clear),
+                                lineWidth: isHovered ? 1.2 : 1
                             )
                     )
-                    .help(hourTooltip(hour: hour, count: count))
+                    .scaleEffect(isHovered ? 1.08 : 1.0)
+                    .animation(.easeOut(duration: 0.12), value: isHovered)
+                    .contentShape(Rectangle())
+                    .onHover { hovering in
+                        if hovering {
+                            hoveredHeatmapHour = hour
+                        } else if hoveredHeatmapHour == hour {
+                            hoveredHeatmapHour = nil
+                        }
+                    }
             }
         }
+    }
+
+    /// Inline header text for the heatmap section. Day total when idle,
+    /// per-hour summary when hovering a cell.
+    private var heatmapHeaderText: String {
+        if let hour = hoveredHeatmapHour {
+            let count = heatmap.hourlyCounts[hour]
+            return hourTooltip(hour: hour, count: count)
+        }
+        return "\(heatmap.totalToday) events"
     }
 
     private func cellColor(intensity: Double, isCurrent: Bool) -> Color {

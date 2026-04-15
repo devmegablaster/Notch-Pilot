@@ -8,6 +8,10 @@ import Combine
 @MainActor
 final class HeatmapAggregator: ObservableObject {
     @Published private(set) var hourlyCounts: [Int] = Array(repeating: 0, count: 24)
+    /// Per-hour project-name → event-count breakdown. Used to surface a
+    /// per-cell tooltip showing which projects were active in that hour.
+    @Published private(set) var hourlyProjects: [[String: Int]] =
+        Array(repeating: [:], count: 24)
     @Published private(set) var maxCount: Int = 0
     @Published private(set) var totalToday: Int = 0
     @Published private(set) var lastRefreshed: Date? = nil
@@ -25,24 +29,38 @@ final class HeatmapAggregator: ObservableObject {
         if refreshTask != nil { return }
 
         refreshTask = Task { [weak self] in
-            let counts = await Task.detached(priority: .utility) {
+            let result = await Task.detached(priority: .utility) {
                 Self.scanToday()
             }.value
             await MainActor.run {
                 guard let self = self else { return }
-                self.hourlyCounts = counts
-                self.maxCount = counts.max() ?? 0
-                self.totalToday = counts.reduce(0, +)
+                self.hourlyCounts = result.counts
+                self.hourlyProjects = result.projects
+                self.maxCount = result.counts.max() ?? 0
+                self.totalToday = result.counts.reduce(0, +)
                 self.lastRefreshed = Date()
                 self.refreshTask = nil
             }
         }
     }
 
+    /// Returns the projects active during a given hour, sorted by event
+    /// count descending. Used by the heatmap hover row.
+    func projects(forHour hour: Int) -> [(name: String, count: Int)] {
+        guard (0..<24).contains(hour) else { return [] }
+        return hourlyProjects[hour]
+            .map { (name: $0.key, count: $0.value) }
+            .sorted { $0.count > $1.count }
+    }
+
     // MARK: - Scan (runs off main)
 
-    private nonisolated static func scanToday() -> [Int] {
+    private nonisolated static func scanToday() -> (
+        counts: [Int],
+        projects: [[String: Int]]
+    ) {
         var counts = Array(repeating: 0, count: 24)
+        var perHourProjects = Array(repeating: [String: Int](), count: 24)
         let calendar = Calendar.current
         let startOfToday = calendar.startOfDay(for: Date())
 
@@ -54,7 +72,7 @@ final class HeatmapAggregator: ObservableObject {
             includingPropertiesForKeys: [.contentModificationDateKey],
             options: [.skipsHiddenFiles]
         ) else {
-            return counts
+            return (counts, perHourProjects)
         }
 
         for projectURL in projects {
@@ -76,15 +94,22 @@ final class HeatmapAggregator: ObservableObject {
                 ).contentModificationDate) ?? .distantPast
                 if mtime < startOfToday { continue }
 
-                scan(fileURL, into: &counts, calendar: calendar, startOfToday: startOfToday)
+                scan(
+                    fileURL,
+                    into: &counts,
+                    perHourProjects: &perHourProjects,
+                    calendar: calendar,
+                    startOfToday: startOfToday
+                )
             }
         }
-        return counts
+        return (counts, perHourProjects)
     }
 
     private nonisolated static func scan(
         _ url: URL,
         into counts: inout [Int],
+        perHourProjects: inout [[String: Int]],
         calendar: Calendar,
         startOfToday: Date
     ) {
@@ -94,9 +119,29 @@ final class HeatmapAggregator: ObservableObject {
             return
         }
 
-        // Cheap fast-path: split lines, quick-reject ones without a
-        // timestamp field, then parse the rest.
-        for rawLine in contents.split(omittingEmptySubsequences: true, whereSeparator: \.isNewline) {
+        let lines = contents.split(omittingEmptySubsequences: true, whereSeparator: \.isNewline)
+
+        // First pass: find a cwd field (any line that has one) so we can
+        // attribute every event in this jsonl to a project name. Falls
+        // back to the directory-encoded name if no cwd is present.
+        var project: String?
+        for rawLine in lines {
+            let line = String(rawLine)
+            guard line.contains("\"cwd\":") else { continue }
+            guard let data = line.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let cwd = obj["cwd"] as? String, !cwd.isEmpty
+            else { continue }
+            project = (cwd as NSString).lastPathComponent
+            break
+        }
+        if project == nil {
+            project = decodeProjectDirName(url.deletingLastPathComponent().lastPathComponent)
+        }
+        let projectName = project ?? "unknown"
+
+        // Second pass: count events.
+        for rawLine in lines {
             let line = String(rawLine)
             guard line.contains("\"timestamp\":") else { continue }
             guard let data = line.data(using: .utf8),
@@ -108,8 +153,18 @@ final class HeatmapAggregator: ObservableObject {
             let hour = calendar.component(.hour, from: date)
             if (0..<24).contains(hour) {
                 counts[hour] += 1
+                perHourProjects[hour][projectName, default: 0] += 1
             }
         }
+    }
+
+    /// Decode a `~/.claude/projects/-Users-foo-myproject` style directory
+    /// name back to its trailing component. Lossy if the actual path
+    /// contained hyphens, but good enough as a fallback for the heatmap.
+    private nonisolated static func decodeProjectDirName(_ encoded: String) -> String {
+        let path = encoded.replacingOccurrences(of: "-", with: "/")
+        let name = (path as NSString).lastPathComponent
+        return name.isEmpty ? encoded : name
     }
 
     /// ISO 8601 parser tolerant of fractional seconds (Claude's timestamps
