@@ -55,6 +55,17 @@ mkdir -p "${APP_DIR}/Contents/Resources"
 cp "${BINARY_PATH}" "${APP_DIR}/Contents/MacOS/${EXECUTABLE_NAME}"
 chmod +x "${APP_DIR}/Contents/MacOS/${EXECUTABLE_NAME}"
 
+# Render the app icon as an .icns. The icon is described in Swift so
+# it's source-controlled, not a binary asset. iconutil is built into
+# macOS — no extra tooling needed.
+echo "▶ Generating app icon..."
+ICONSET_DIR="${DIST_DIR}/AppIcon.iconset"
+ICNS_PATH="${APP_DIR}/Contents/Resources/AppIcon.icns"
+rm -rf "${ICONSET_DIR}"
+swift scripts/generate-icon.swift "${ICONSET_DIR}"
+iconutil -c icns "${ICONSET_DIR}" -o "${ICNS_PATH}"
+rm -rf "${ICONSET_DIR}"
+
 cat > "${APP_DIR}/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -66,6 +77,8 @@ cat > "${APP_DIR}/Contents/Info.plist" <<EOF
     <string>${APP_NAME}</string>
     <key>CFBundleExecutable</key>
     <string>${EXECUTABLE_NAME}</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>${BUNDLE_ID}</string>
     <key>CFBundleInfoDictionaryVersion</key>
