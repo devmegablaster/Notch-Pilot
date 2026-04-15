@@ -93,7 +93,15 @@ final class NotchWindow: NSPanel {
         // running claude process — brings us on screen.
     }
 
-    override var canBecomeKey: Bool { true }
+    // Never become the key window. `.nonactivatingPanel` already stops
+    // the panel from activating our app on click — but without this,
+    // the panel still becomes the *key* window, which steals keyboard
+    // focus from whatever was previously key (your editor, terminal,
+    // etc). The side effect is that keyboard shortcuts bound to panel
+    // buttons (Enter / Esc on Allow / Deny) and typing in the filter
+    // bar stop working. Button clicks still work because they fire
+    // on mouse events regardless of key state.
+    override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
     // MARK: - Frame helpers
