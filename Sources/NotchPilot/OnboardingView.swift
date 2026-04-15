@@ -48,6 +48,13 @@ struct OnboardingView: View {
     // bar once it takes the notch's proportions.
     @State private var notchContentOpacity: Double = 0
 
+    // Scripted blink control for the hero eyes. 0 = fully open, 1 =
+    // fully closed. Driven by the animation timeline so we can do the
+    // deliberate "blink-blink … blink-blink … boom" sequence right
+    // before the morph starts.
+    @State private var blinkProgress: CGFloat = 0
+    @State private var naturalBlinkTask: Task<Void, Never>?
+
     @State private var finished = false
 
     private let copy = [
@@ -113,10 +120,14 @@ struct OnboardingView: View {
                             radius: 28, y: 8
                         )
 
-                        BuddyFace(mode: .content, size: 22)
-                            .frame(width: 120, height: 60)
-                            .scaleEffect(buddyScale)
-                            .opacity(buddyOpacity)
+                        OnboardingEyes(
+                            size: 22,
+                            color: prefs.color.base,
+                            blinkProgress: blinkProgress
+                        )
+                        .frame(width: 120, height: 60)
+                        .scaleEffect(buddyScale)
+                        .opacity(buddyOpacity)
                     }
 
                     VStack(spacing: 10) {
@@ -179,6 +190,11 @@ struct OnboardingView: View {
             buddyOpacity = 1
         }
 
+        // Kick off the natural blink loop so the eyes feel alive from
+        // the moment they appear — through the text reveal and into
+        // the hold. Stopped before the scripted blinks fire.
+        startNaturalBlinks()
+
         Task { @MainActor in
             // Phase 3 (1.4s): text container fades in, lines reveal
             // with gentle spacing so they feel deliberate.
@@ -195,7 +211,15 @@ struct OnboardingView: View {
             skipVisible = true
 
             // Phase 5: hold so the user can actually read.
-            try? await Task.sleep(for: .milliseconds(2000))
+            try? await Task.sleep(for: .milliseconds(1600))
+            if finished { return }
+
+            // Phase 5.5: one deliberate blink-blink right before the
+            // morph. Stop the natural loop first so the scripted pair
+            // reads as intentional, not random.
+            stopNaturalBlinks()
+            await doubleBlink()
+            try? await Task.sleep(for: .milliseconds(450))
             if finished { return }
 
             // Phase 6: text fades out first.
@@ -263,6 +287,7 @@ struct OnboardingView: View {
     private func skip() {
         guard !finished else { return }
         finished = true
+        stopNaturalBlinks()
         withAnimation(.easeOut(duration: 0.3)) {
             backdropOpacity = 0
             backdropTintOpacity = 0
@@ -279,5 +304,76 @@ struct OnboardingView: View {
     private func complete() {
         if !finished { finished = true }
         onComplete()
+    }
+
+    // MARK: - Blink choreography
+
+    /// Runs one blink: close the eyes fast, pause a beat, reopen.
+    @MainActor
+    private func singleBlink() async {
+        withAnimation(.easeOut(duration: 0.07)) { blinkProgress = 1 }
+        try? await Task.sleep(for: .milliseconds(80))
+        withAnimation(.easeIn(duration: 0.08)) { blinkProgress = 0 }
+        try? await Task.sleep(for: .milliseconds(90))
+    }
+
+    /// A pair of quick blinks back to back — the "blink-blink" unit.
+    @MainActor
+    private func doubleBlink() async {
+        await singleBlink()
+        try? await Task.sleep(for: .milliseconds(60))
+        await singleBlink()
+    }
+
+    /// Background loop that fires occasional natural blinks while the
+    /// intro plays. Lets the eyes feel alive during text reveal and
+    /// the read-pause. Cancelled before the scripted sequence.
+    private func startNaturalBlinks() {
+        naturalBlinkTask?.cancel()
+        naturalBlinkTask = Task { @MainActor in
+            // Initial offset so the first blink doesn't fire on top of
+            // the buddy popping into existence.
+            try? await Task.sleep(for: .milliseconds(900))
+            while !Task.isCancelled {
+                let waitMs = UInt64.random(in: 2400 ... 3800)
+                try? await Task.sleep(for: .milliseconds(Int(waitMs)))
+                if Task.isCancelled { return }
+                await singleBlink()
+            }
+        }
+    }
+
+    private func stopNaturalBlinks() {
+        naturalBlinkTask?.cancel()
+        naturalBlinkTask = nil
+    }
+}
+
+/// Custom hero eyes used only during onboarding. Mirrors the look of
+/// `EyesBuddy` but exposes a `blinkProgress` input (0 = open, 1 = shut)
+/// so the animation timeline can script blinks deliberately instead of
+/// relying on the autonomous blink loop that `BuddyFace` runs.
+private struct OnboardingEyes: View {
+    let size: CGFloat
+    let color: Color
+    let blinkProgress: CGFloat
+
+    var body: some View {
+        HStack(spacing: size * 0.85) {
+            eye
+            eye
+        }
+    }
+
+    private var eye: some View {
+        let openHeight = size
+        let closedHeight = max(1.5, size * 0.15)
+        let height = openHeight - (openHeight - closedHeight) * blinkProgress
+        return Circle()
+            .fill(color)
+            .frame(width: size, height: height)
+            // Toned-down glow — the original was overpowering the
+            // eye disks at 3× scale during the onboarding hero.
+            .shadow(color: color.opacity(0.45), radius: size * 0.35)
     }
 }
