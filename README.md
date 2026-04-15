@@ -17,11 +17,11 @@
 </p>
 
 <p align="center">
-  <video src="./docs/demo.mp4" width="720" controls autoplay loop muted playsinline></video>
+  <img src="./docs/demo.gif" alt="Notch Pilot in action" width="720" />
 </p>
 
 <p align="center">
-  <i>Full demo video above — if it doesn't render inline, <a href="./docs/demo.mp4">click here</a>.</i>
+  <sub>Prefer higher quality? <a href="./docs/demo.mp4">Watch the 720p MP4</a>.</sub>
 </p>
 
 ---
