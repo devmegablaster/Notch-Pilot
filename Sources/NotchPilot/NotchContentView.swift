@@ -27,6 +27,11 @@ struct NotchContentView: View {
     /// Currently hovered heatmap cell (0-23) or nil. Drives the
     /// header tooltip + cell highlight.
     @State private var hoveredHeatmapHour: Int?
+
+    /// Session being inspected in the detail overlay (or nil). Set by
+    /// clicking a row in the session list; cleared by dismissing the
+    /// overlay. Keeps the panel open while non-nil.
+    @State private var inspectedSession: ClaudeSession?
     // Synchronously-controlled visibility. Set to true the moment activity
     // appears; only set back to false after the fade-out delay elapses with
     // no fresh activity. Decoupled from `hasAnyActivity` so we don't race
@@ -72,6 +77,7 @@ struct NotchContentView: View {
             || mouseMonitor.isHoveringNotch
             || expanded
             || showingAppearancePicker
+            || inspectedSession != nil
     }
 
     private var hasPendingPermission: Bool {
@@ -393,7 +399,17 @@ struct NotchContentView: View {
                     )
             }
         }
+        .overlay(alignment: .top) {
+            if let session = inspectedSession {
+                sessionDetailOverlay(session)
+                    .transition(
+                        .scale(scale: 0.96, anchor: .top)
+                        .combined(with: .opacity)
+                    )
+            }
+        }
         .animation(.easeOut(duration: 0.18), value: showingAppearancePicker)
+        .animation(.easeOut(duration: 0.18), value: inspectedSession?.id)
         .contentShape(shape)
         .onHover { hovering in
             // Don't collapse while the picker overlay is up — the user may
@@ -405,7 +421,7 @@ struct NotchContentView: View {
                 collapseTask = nil
                 return
             }
-            guard !showingAppearancePicker else { return }
+            guard !showingAppearancePicker && inspectedSession == nil else { return }
 
             // Debounce the collapse. At the edge of the panel's rounded
             // shape the hover state can flip in/out as the window resizes
@@ -421,7 +437,10 @@ struct NotchContentView: View {
         }
         .onChange(of: expanded) { _, isExpanded in
             // Closing the panel closes the picker too.
-            if !isExpanded { showingAppearancePicker = false }
+            if !isExpanded {
+                showingAppearancePicker = false
+                inspectedSession = nil
+            }
         }
         .contextMenu {
             Button("Quit Notch Pilot") { NSApp.terminate(nil) }
@@ -471,6 +490,224 @@ struct NotchContentView: View {
             .onTapGesture { /* swallow */ }
         }
         .frame(width: expandedWidth, height: expandedHeight, alignment: .top)
+    }
+
+    // MARK: - Session detail overlay
+
+    private func sessionDetailOverlay(_ session: ClaudeSession) -> some View {
+        ZStack(alignment: .top) {
+            Rectangle()
+                .fill(Color.black.opacity(0.55))
+                .contentShape(Rectangle())
+                .onTapGesture { inspectedSession = nil }
+
+            VStack(spacing: 0) {
+                sessionDetailHeader(session)
+                    .padding(.horizontal, 18)
+                    .padding(.top, 16)
+                    .padding(.bottom, 10)
+
+                Rectangle()
+                    .fill(Color.white.opacity(0.06))
+                    .frame(height: 1)
+                    .padding(.horizontal, 18)
+
+                ScrollView(showsIndicators: false) {
+                    sessionDetailTimeline(session)
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 12)
+                }
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color(white: 0.11))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.1), lineWidth: 0.5)
+                    )
+                    .shadow(color: .black.opacity(0.6), radius: 18, y: 10)
+            )
+            .frame(maxHeight: expandedHeight - 100)
+            .padding(.horizontal, 24)
+            .padding(.top, max(notchHeight, 14) + 22)
+            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .onTapGesture { /* swallow */ }
+        }
+        .frame(width: expandedWidth, height: expandedHeight, alignment: .top)
+    }
+
+    private func sessionDetailHeader(_ s: ClaudeSession) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(s.shortStatus.isEmpty ? Color.white.opacity(0.3) : accent)
+                        .frame(width: 7, height: 7)
+                    Text(s.projectName)
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .foregroundColor(.white)
+                    if !s.shortStatus.isEmpty {
+                        Text(s.shortStatus)
+                            .font(.system(size: 9, weight: .medium, design: .rounded))
+                            .foregroundColor(accent)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(accentDim))
+                    }
+                }
+                HStack(spacing: 6) {
+                    if !s.model.isEmpty {
+                        Text(compactModelName(s.model))
+                            .font(.system(size: 10, design: .rounded))
+                            .foregroundColor(.white.opacity(0.55))
+                        Circle()
+                            .fill(Color.white.opacity(0.2))
+                            .frame(width: 2, height: 2)
+                    }
+                    Text("up \(durationLabel(s.startTime))")
+                        .font(.system(size: 10, design: .rounded))
+                        .foregroundColor(.white.opacity(0.55))
+                    Circle()
+                        .fill(Color.white.opacity(0.2))
+                        .frame(width: 2, height: 2)
+                    Text(relativeTime(s.lastActivity))
+                        .font(.system(size: 10, design: .rounded))
+                        .foregroundColor(.white.opacity(0.55))
+                }
+                if !s.cwd.isEmpty {
+                    Text(s.cwd.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.35))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+
+            Spacer(minLength: 4)
+
+            Button {
+                if !s.cwd.isEmpty { TerminalJumper.jump(toCwd: s.cwd) }
+            } label: {
+                Image(systemName: "arrow.up.right.square")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.6))
+                    .padding(6)
+            }
+            .buttonStyle(.plain)
+            .help("Jump to terminal")
+
+            Button { inspectedSession = nil } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.white.opacity(0.5))
+                    .frame(width: 22, height: 22)
+                    .background(Circle().fill(Color.white.opacity(0.08)))
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut(.cancelAction)
+        }
+    }
+
+    @ViewBuilder
+    private func sessionDetailTimeline(_ s: ClaudeSession) -> some View {
+        let events = monitor.recentEvents(for: s, limit: 30)
+        if events.isEmpty {
+            VStack(spacing: 6) {
+                Image(systemName: "tray")
+                    .font(.system(size: 24))
+                    .foregroundColor(.white.opacity(0.25))
+                Text("No activity yet")
+                    .font(.system(size: 11, design: .rounded))
+                    .foregroundColor(.white.opacity(0.4))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 30)
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(events) { event in
+                    sessionEventRow(event)
+                }
+            }
+        }
+    }
+
+    private func sessionEventRow(_ event: SessionEvent) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: event.icon)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(eventIconColor(event))
+                .frame(width: 18, height: 18)
+                .background(
+                    Circle().fill(eventIconBackground(event))
+                )
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(event.label)
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundColor(eventLabelColor(event))
+                    Spacer(minLength: 0)
+                    Text(relativeTime(event.timestamp))
+                        .font(.system(size: 9, design: .rounded))
+                        .foregroundColor(.white.opacity(0.35))
+                        .monospacedDigit()
+                }
+                if !event.body.isEmpty {
+                    Text(event.body)
+                        .font(.system(
+                            size: 11,
+                            design: event.kind == .toolUse || event.kind == .toolResult
+                                ? .monospaced : .default
+                        ))
+                        .foregroundColor(.white.opacity(0.78))
+                        .lineLimit(4)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.white.opacity(0.035))
+        )
+    }
+
+    private func eventIconColor(_ event: SessionEvent) -> Color {
+        switch event.kind {
+        case .user:          return .white.opacity(0.8)
+        case .assistantText: return accent
+        case .toolUse:       return accent
+        case .thinking:      return .white.opacity(0.5)
+        case .toolResult:    return event.isError
+            ? Color(red: 0.94, green: 0.45, blue: 0.45)
+            : .white.opacity(0.6)
+        }
+    }
+
+    private func eventIconBackground(_ event: SessionEvent) -> Color {
+        switch event.kind {
+        case .user:          return Color.white.opacity(0.1)
+        case .assistantText: return accentDim
+        case .toolUse:       return accentDim
+        case .thinking:      return Color.white.opacity(0.06)
+        case .toolResult:    return event.isError
+            ? Color.red.opacity(0.14)
+            : Color.white.opacity(0.06)
+        }
+    }
+
+    private func eventLabelColor(_ event: SessionEvent) -> Color {
+        switch event.kind {
+        case .user:          return .white
+        case .assistantText: return accent
+        case .toolUse:       return accent
+        case .thinking:      return .white.opacity(0.6)
+        case .toolResult:    return event.isError
+            ? Color(red: 0.94, green: 0.55, blue: 0.55)
+            : .white.opacity(0.75)
+        }
     }
 
     private var appearancePickerHeader: some View {
@@ -1801,6 +2038,16 @@ struct NotchContentView: View {
     // MARK: - Session row
 
     private func sessionRow(_ s: ClaudeSession) -> some View {
+        Button {
+            inspectedSession = s
+        } label: {
+            sessionRowContent(s)
+        }
+        .buttonStyle(.plain)
+        .help("Click to see what this session is up to")
+    }
+
+    private func sessionRowContent(_ s: ClaudeSession) -> some View {
         let isActive = !s.shortStatus.isEmpty
 
         return HStack(alignment: .center, spacing: 10) {
