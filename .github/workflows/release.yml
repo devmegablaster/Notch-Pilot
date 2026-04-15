@@ -96,13 +96,16 @@ jobs:
 
             app "Notch Pilot.app"
 
-            # The app is ad-hoc signed (no paid Apple Developer ID), so
-            # macOS Gatekeeper quarantines it on download. Strip the
-            # quarantine attribute so the user isn't blocked on first
-            # launch. Standard pattern for unsigned open-source casks.
+            # Postflight: strip the quarantine attribute (the app is
+            # ad-hoc signed, so Gatekeeper would otherwise block it on
+            # first launch) and then immediately launch the app. The
+            # user expects a notch utility to "just appear" after
+            # install, not to have to dig through /Applications.
             postflight do
               system_command "/usr/bin/xattr",
                              args: ["-dr", "com.apple.quarantine", "#{appdir}/Notch Pilot.app"]
+              system_command "/usr/bin/open",
+                             args: ["-a", "#{appdir}/Notch Pilot.app"]
             end
 
             zap trash: [
