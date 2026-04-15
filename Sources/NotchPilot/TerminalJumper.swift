@@ -51,16 +51,30 @@ enum TerminalJumper {
     // MARK: - Process enumeration
 
     private static func findClaudePID(cwd: String) -> Int32? {
+        // Normalize the target cwd once so /private prefixes and trailing
+        // slashes don't cause false negatives when comparing.
+        let targetCwd = ProcessLookup.normalize(cwd)
+
         for pid in ProcessLookup.allPIDs() where pid > 0 {
-            guard let name = ProcessLookup.name(of: pid) else { continue }
-            // Match by command name. Claude Code binaries sometimes show up
-            // as "claude", sometimes as "node" (when launched via npm). The
-            // cwd check filters out any false positives.
-            let lowered = name.lowercased()
-            guard lowered.contains("claude") || lowered == "node" else { continue }
+            // Match by comm name OR exe path — same dual-check as
+            // ClaudeMonitor, because real claude processes sometimes
+            // report a version string like "2.1.101" for proc_name
+            // rather than "claude". Also still accept "node" in case
+            // Claude was launched via an npm wrapper.
+            let name = (ProcessLookup.name(of: pid) ?? "").lowercased()
+            let nameMatches = name.contains("claude") || name == "node"
+            var pathMatches = false
+            if !nameMatches {
+                if let exePath = ProcessLookup.path(of: pid)?.lowercased() {
+                    pathMatches = exePath.contains("/claude/versions/")
+                        || exePath.hasSuffix("/claude")
+                        || exePath.hasSuffix("/bin/claude")
+                }
+            }
+            guard nameMatches || pathMatches else { continue }
 
             guard let procCwd = ProcessLookup.cwd(of: pid) else { continue }
-            if procCwd == cwd {
+            if ProcessLookup.normalize(procCwd) == targetCwd {
                 return pid
             }
         }
