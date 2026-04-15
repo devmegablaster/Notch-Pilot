@@ -45,13 +45,13 @@ That's it. No menu bar icon. No dock icon. Hover the notch and the app reveals i
 
 ### Live Claude usage, right in the notch
 
-<img src="./docs/usage.png" alt="Usage popover" width="520" align="right" />
-
 The center of the expanded panel shows your **real 5-hour session utilization %** — the same number Claude's billing page shows you, not an estimate. Click it for the full breakdown: weekly limits (all models / Sonnet / Opus), extra-credit usage, reset countdowns, and today's input/output/cache token breakdown.
 
 This works because Notch Pilot reads the Claude Code OAuth token the same way Claude Code itself does (via the `security` CLI) and hits Anthropic's `oauth/usage` endpoint directly. Nothing ships off your machine.
 
-<br clear="right"/>
+<p align="center">
+  <img src="./docs/usage.png" alt="Live usage pill in the notch" width="720" />
+</p>
 
 ### A buddy that reacts to what Claude is doing
 
@@ -66,29 +66,29 @@ The collapsed pill carries one of six animated buddies — eyes, orb, waves, gho
 
 ### Permission prompts without leaving your editor
 
-<img src="./docs/permission.png" alt="Permission prompt in the notch" width="520" align="right" />
-
 When Claude asks for permission to run a command, the notch expands into a structured view of the request. Shell commands get a code block. File edits get a red/green diff. URLs get a parsed host/path split. You get **Deny**, **Allow**, and **Always allow `<Tool>`** — the "always allow" path writes to `~/.claude/settings.json` so Claude Code honors it natively next time.
 
 `AskUserQuestion` gets the same treatment: each option becomes a clickable button.
 
-<br clear="right"/>
+<p align="center">
+  <img src="./docs/permission.png" alt="Permission prompt rendered inside the notch" width="720" />
+</p>
 
 ### See every session at a glance
 
-<img src="./docs/sessions.png" alt="Session list" width="520" align="right" />
-
 Hover the notch to see every live Claude session: project name, model, uptime, permission mode. Click a session to see its recent activity — user prompts, tool calls, assistant replies, errors — as a timeline. Click the arrow to jump to the hosting terminal; **tmux pane navigation** is supported, so it selects the exact pane running Claude before activating Alacritty, Terminal, iTerm, Ghostty, Kitty, WezTerm, Warp, and friends.
 
-<br clear="right"/>
+<p align="center">
+  <img src="./docs/sessions.png" alt="Session list in the expanded panel" width="720" />
+</p>
 
 ### Activity heatmap with history
 
-<img src="./docs/heatmap.png" alt="Activity heatmap" width="520" align="right" />
-
 A 24-hour activity strip per day, with `‹` `›` arrows to walk back through previous days. Hover any cell to see which projects were active in that hour. Useful for noticing when you actually did the work vs when you think you did.
 
-<br clear="right"/>
+<p align="center">
+  <img src="./docs/heatmap.png" alt="24-hour activity heatmap" width="720" />
+</p>
 
 ### Session finished? The buddy lets you know
 
