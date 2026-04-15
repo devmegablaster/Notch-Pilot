@@ -64,9 +64,11 @@ final class HookBridge: ObservableObject {
     func start() {
         server.onRequest = { [weak self] request, respond in
             // We hop to the main actor so published state is always mutated
-            // from the expected context.
+            // from the expected context. Bind weak self to a local let
+            // first so the concurrent Task closure isn't capturing a var.
+            guard let self else { respond(nil); return }
             Task { @MainActor in
-                self?.handle(request: request, respond: respond)
+                self.handle(request: request, respond: respond)
             }
         }
 

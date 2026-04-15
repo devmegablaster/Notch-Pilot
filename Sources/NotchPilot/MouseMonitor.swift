@@ -28,9 +28,8 @@ final class MouseMonitor: ObservableObject {
     func start() {
         stop()
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.tick()
-            }
+            guard let self else { return }
+            Task { @MainActor in self.tick() }
         }
     }
 

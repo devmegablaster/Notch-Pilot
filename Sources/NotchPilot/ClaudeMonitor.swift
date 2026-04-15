@@ -47,7 +47,11 @@ final class ClaudeMonitor: ObservableObject {
     func start() {
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
+            // Rebind weak self to a local let before the Task so the
+            // inner concurrent closure isn't capturing a `var`. Swift 6's
+            // strict concurrency rejects the var capture across actors.
+            guard let self else { return }
+            Task { @MainActor in self.refresh() }
         }
     }
 
