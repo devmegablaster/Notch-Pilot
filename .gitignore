@@ -1,0 +1,32 @@
+# Swift / SPM
+.build/
+.swiftpm/
+Package.resolved
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+
+# Xcode user state
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+
+# Build artifacts we produce via scripts/build.sh
+dist/
+
+# Claude Code local state (per-user, not for source control)
+.claude/settings.local.json
+
+# Editor junk
+.idea/
+.vscode/
+*.swp
+*~
