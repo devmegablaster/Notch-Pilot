@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./docs/app-icon.png" alt="Notch Pilot" width="160" />
+</p>
+
 # Notch Pilot
 
 A live companion for [Claude Code](https://docs.claude.com/en/docs/claude-code) that lives in your MacBook's notch.
