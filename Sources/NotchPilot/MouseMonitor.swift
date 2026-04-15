@@ -39,18 +39,26 @@ final class MouseMonitor: ObservableObject {
     }
 
     private func tick() {
-        let inside = hitRect.contains(NSEvent.mouseLocation)
+        // Hysteresis: use a tight rect to enter the hover state and a
+        // larger rect to exit it. Without this, hovering right at the
+        // edge of the hit area causes rapid toggling — each 100ms poll
+        // sees the cursor cross the boundary as pixel-level jitter
+        // nudges it in and out, which flickers the panel.
+        let rect = isHoveringNotch ? exitRect : enterRect
+        let inside = rect.contains(NSEvent.mouseLocation)
         if inside != isHoveringNotch {
             isHoveringNotch = inside
         }
     }
 
-    /// Screen-coordinate rect covering the notch area plus a generous
-    /// margin so the hover isn't fussy to trigger.
-    private var hitRect: CGRect {
+    private var enterRect: CGRect { hitRect(margin: 18) }
+    private var exitRect: CGRect { hitRect(margin: 60) }
+
+    /// Screen-coordinate rect covering the notch area plus a margin
+    /// so the hover isn't fussy to trigger.
+    private func hitRect(margin: CGFloat) -> CGRect {
         guard let screen = NSScreen.main else { return .zero }
         let frame = screen.frame
-        let margin: CGFloat = 30
         return CGRect(
             x: frame.midX - notchWidth / 2 - margin,
             y: frame.maxY - notchHeight - margin,
