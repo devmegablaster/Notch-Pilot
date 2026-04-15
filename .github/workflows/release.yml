@@ -1,0 +1,115 @@
+name: Release
+
+# Triggers on semver tags pushed to the repo, e.g. `git tag v0.2.0 && git push --tags`.
+# Builds the .app bundle + DMG, attaches the DMG to a GitHub Release, and
+# updates the Homebrew cask in the maintainer's personal tap repo.
+#
+# Setup required once before the first tagged release:
+#   1. Create a Personal Access Token (classic, `repo` scope, or fine-grained
+#      with contents:write on the tap repo).
+#   2. Add it to this repo's Actions secrets as `TAP_PUSH_TOKEN`.
+# After that, every `git tag v*.*.* && git push --tags` ships a release and
+# bumps the brew cask automatically.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Releasing version ${VERSION}"
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Build .app bundle
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: ./scripts/build.sh
+
+      - name: Package DMG
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: ./scripts/make-dmg.sh
+
+      - name: Compute DMG SHA256
+        id: sha
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          DMG="dist/NotchPilot-${VERSION}.dmg"
+          if [ ! -f "$DMG" ]; then
+            echo "❌ expected DMG at $DMG"
+            ls -la dist/
+            exit 1
+          fi
+          SHA=$(shasum -a 256 "$DMG" | awk '{print $1}')
+          echo "SHA=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "DMG_PATH=${DMG}" >> "$GITHUB_OUTPUT"
+          echo "DMG=${DMG} sha256=${SHA}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.sha.outputs.DMG_PATH }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+
+      - name: Update Homebrew tap
+        env:
+          TAP_PUSH_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
+          SHA: ${{ steps.sha.outputs.SHA }}
+        run: |
+          set -euo pipefail
+
+          git clone "https://x-access-token:${TAP_PUSH_TOKEN}@github.com/devmegablaster/homebrew-devmegablaster.git" tap
+          cd tap
+          mkdir -p Casks
+
+          cat > Casks/notch-pilot.rb <<RUBY
+          cask "notch-pilot" do
+            version "${VERSION}"
+            sha256 "${SHA}"
+
+            url "https://github.com/devmegablaster/Notch-Pilot/releases/download/v#{version}/NotchPilot-#{version}.dmg"
+            name "Notch Pilot"
+            desc "Live companion for Claude Code that lives in your MacBook notch"
+            homepage "https://github.com/devmegablaster/Notch-Pilot"
+
+            depends_on macos: ">= :sonoma"
+
+            app "Notch Pilot.app"
+
+            zap trash: [
+              "~/.notch-pilot",
+            ]
+          end
+          RUBY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet Casks/notch-pilot.rb; then
+            echo "Cask already up to date for ${VERSION}"
+            exit 0
+          fi
+
+          git add Casks/notch-pilot.rb
+          git commit -m "notch-pilot ${VERSION}"
+          git push
