@@ -1,75 +1,173 @@
 <p align="center">
-  <img src="./docs/app-icon.png" alt="Notch Pilot" width="160" />
+  <img src="./docs/app-icon.png" alt="Notch Pilot" width="140" />
 </p>
 
-# Notch Pilot
+<h1 align="center">Notch Pilot</h1>
 
-A live companion for [Claude Code](https://docs.claude.com/en/docs/claude-code) that lives in your MacBook's notch.
+<p align="center">
+  <b>Your MacBook notch, but it's a live Claude Code dashboard.</b><br/>
+  Live usage limits, session status, permission prompts, and an animated buddy — all in the hole you already stare at.
+</p>
 
-When Claude is working, a little buddy peeks out of the notch and reacts to what's happening — blinks while thinking, narrows its eyes while editing, goes wide-eyed red when something dangerous is about to run. Hover the notch to see all your running sessions, jump to their terminals, handle permission prompts, and watch today's activity as a heatmap.
+<p align="center">
+  <a href="https://github.com/devmegablaster/Notch-Pilot/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/devmegablaster/Notch-Pilot?color=green&label=release"></a>
+  <a href="https://github.com/devmegablaster/Notch-Pilot/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/devmegablaster/Notch-Pilot?color=blue"></a>
+  <img alt="Platform" src="https://img.shields.io/badge/macOS-14%2B-black">
+  <a href="https://github.com/devmegablaster/Notch-Pilot/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/devmegablaster/Notch-Pilot?style=social"></a>
+</p>
 
-## Features
+<p align="center">
+  <video src="./docs/demo.mp4" width="720" controls autoplay loop muted playsinline></video>
+</p>
 
-- **Live notch presence.** A buddy slides out of the notch the moment `claude` starts in any terminal and fades away 10 seconds after the session ends.
-- **Six styles, six colors.** Eyes, orb, waves, ghost, cat, bunny × orange, blue, green, purple, pink, cyan. Click the buddy face in the expanded panel to switch.
-- **Reactive moods.** Editing files → focused. Running shell → active. `rm -rf` / `DROP TABLE` / `sudo` → wide-eyed shock. Permission needed → curious. Session ending → content.
-- **Permission prompts in the notch.** A hook intercepts every `PermissionRequest` and surfaces a structured view of what the tool wants to do — shell command, file diff, URL, pattern — with `Deny`, `Allow`, and `Always allow <Tool>`. "Always allow" writes to `~/.claude/settings.json` so Claude Code honors it natively next time.
-- **Session panel.** Hover the notch to see every live session with project, model, uptime, and permission mode. One click jumps to the hosting terminal (tmux-aware). 24-hour activity heatmap, allow-list manager, and filter bar all live here.
-- **Voice announcements.** Optional, per event (permission / danger / session started / session finished). Off by default.
-- **No menu bar, no dock icon.** The notch is the entire surface. Quit lives on a power button in the expanded panel header.
+<p align="center">
+  <i>Full demo video above — if it doesn't render inline, <a href="./docs/demo.mp4">click here</a>.</i>
+</p>
+
+---
 
 ## Install
 
-### Homebrew (recommended)
-
 ```sh
-brew install --cask devmegablaster/devmegablaster/notch-pilot
+brew tap devmegablaster/devmegablaster
+brew install --cask notch-pilot
 ```
 
-First launch: right-click `Notch Pilot.app` in `/Applications` → **Open** (the app is ad-hoc signed, not Developer-ID signed, so Gatekeeper needs a one-time override).
+First launch: right-click `Notch Pilot.app` in `/Applications` → **Open** (the app is ad-hoc signed, so Gatekeeper needs a one-time nod).
 
-### DMG
+That's it. No menu bar icon. No dock icon. Hover the notch and the app reveals itself.
 
-1. Grab the latest `.dmg` from [Releases](https://github.com/devmegablaster/Notch-Pilot/releases).
-2. Drag `Notch Pilot.app` to `/Applications`.
-3. First launch: right-click → **Open**.
+> Prefer the direct long form: `brew install --cask devmegablaster/devmegablaster/notch-pilot`
 
-### From source
+---
 
-Requires macOS 14+ and Swift 5.9+.
+## What it actually does
+
+### Live Claude usage, right in the notch
+
+<img src="./docs/usage.png" alt="Usage popover" width="520" align="right" />
+
+The center of the expanded panel shows your **real 5-hour session utilization %** — the same number Claude's billing page shows you, not an estimate. Click it for the full breakdown: weekly limits (all models / Sonnet / Opus), extra-credit usage, reset countdowns, and today's input/output/cache token breakdown.
+
+This works because Notch Pilot reads the Claude Code OAuth token the same way Claude Code itself does (via the `security` CLI) and hits Anthropic's `oauth/usage` endpoint directly. Nothing ships off your machine.
+
+<br clear="right"/>
+
+### A buddy that reacts to what Claude is doing
+
+The collapsed pill carries one of six animated buddies — eyes, orb, waves, ghost, cat, bunny — in one of six colors. Each has seven expressions that fire based on what Claude is actually doing:
+
+- **Focused** (narrow, steady) — editing files
+- **Active** (pulsing) — running a tool
+- **Curious** (darting eyes) — permission request pending
+- **Shocked** (wide-eyed red) — dangerous command detected (`rm -rf /`, `DROP TABLE`, `sudo rm`, fork bombs, etc.)
+- **Content** (happy blinks) — 10-second farewell after activity ends
+- **Idle / Sleeping** — nothing happening
+
+### Permission prompts without leaving your editor
+
+<img src="./docs/permission.png" alt="Permission prompt in the notch" width="520" align="right" />
+
+When Claude asks for permission to run a command, the notch expands into a structured view of the request. Shell commands get a code block. File edits get a red/green diff. URLs get a parsed host/path split. You get **Deny**, **Allow**, and **Always allow `<Tool>`** — the "always allow" path writes to `~/.claude/settings.json` so Claude Code honors it natively next time.
+
+`AskUserQuestion` gets the same treatment: each option becomes a clickable button.
+
+<br clear="right"/>
+
+### See every session at a glance
+
+<img src="./docs/sessions.png" alt="Session list" width="520" align="right" />
+
+Hover the notch to see every live Claude session: project name, model, uptime, permission mode. Click a session to see its recent activity — user prompts, tool calls, assistant replies, errors — as a timeline. Click the arrow to jump to the hosting terminal; **tmux pane navigation** is supported, so it selects the exact pane running Claude before activating Alacritty, Terminal, iTerm, Ghostty, Kitty, WezTerm, Warp, and friends.
+
+<br clear="right"/>
+
+### Activity heatmap with history
+
+<img src="./docs/heatmap.png" alt="Activity heatmap" width="520" align="right" />
+
+A 24-hour activity strip per day, with `‹` `›` arrows to walk back through previous days. Hover any cell to see which projects were active in that hour. Useful for noticing when you actually did the work vs when you think you did.
+
+<br clear="right"/>
+
+### Session finished? The buddy lets you know
+
+When a Claude session wraps, the notch pops out of its hole into a bigger pill with the buddy centered and the project name below — so you can glance up from your editor and see that `notch-pilot done` without tabbing. Configurable and rate-limited; never interrupts.
+
+---
+
+## Other things worth mentioning
+
+- **Auto-start at login** — registered via `SMAppService`, toggle in Behavior settings
+- **Always-visible mode** — pin the buddy to the notch even when nothing's running (idle peeks + `zzz…` text, default on)
+- **Haptic feedback** — a subtle `.levelChange` tick when the panel opens or closes (Force Touch trackpads only)
+- **Voice announcements** — optional per-event (permission / danger / session started / session finished), off by default
+- **No menu bar, no dock icon** — the notch is the entire surface. Quit lives on a power button in the expanded panel header.
+
+---
+
+## Requirements
+
+- **macOS 14 (Sonoma)** or later with a MacBook notch (works on non-notched displays too, just less visually interesting)
+- **[Claude Code CLI](https://docs.claude.com/en/docs/claude-code)** signed in
+- **[Node.js](https://nodejs.org/)** on your `PATH` — the permission hook is a ~100-line Node script. Without it, sessions still show but permission interception won't work.
+
+---
+
+## How it works
+
+Notch Pilot watches three things:
+
+1. **`~/.claude/projects/**/*.jsonl`** — Claude Code writes session transcripts here. The app tails the latest file every second, parses the last entry's `tool_use` block, and cross-references with live `claude` processes via `libproc` to filter dead sessions.
+2. **A Claude Code hook** auto-installed on first launch in `~/.claude/settings.json`. On `PermissionRequest` / `PreToolUse` / `UserPromptSubmit` it pipes the event over a Unix domain socket (`~/.notch-pilot/pilot.sock`) to the running app. Permission prompts block the hook until the user clicks allow or deny.
+3. **Anthropic's `oauth/usage` endpoint** for the live usage percentages. Reads the Claude Code OAuth token via `/usr/bin/security find-generic-password` — the `security` CLI is on the Keychain credential's ACL allow-list, so reads succeed silently without password prompts.
+
+The UI is an `NSPanel` hosting SwiftUI via `NSHostingView`, morphing between a collapsed pill and a full panel. The window resizes to fit content so clicks outside the pill pass through to whatever's underneath.
+
+---
+
+## Privacy
+
+Everything runs locally. No analytics, no telemetry, no network calls other than Anthropic's own usage endpoint (which Claude Code already uses on your behalf). The app only touches:
+
+- `~/.claude/projects/` (read — session transcripts)
+- `~/.claude/settings.json` (read/write — installs the permission hook)
+- `~/.notch-pilot/` (read/write — hook script + Unix socket)
+- macOS Keychain item `Claude Code-credentials` (read — via the `security` CLI, the same way Claude Code uses it)
+
+No account, no sign-up, no server-side anything.
+
+---
+
+## Uninstall
+
+```sh
+brew uninstall --cask notch-pilot
+rm -rf ~/.notch-pilot
+```
+
+Then open `~/.claude/settings.json` and delete any `hooks` entries that reference `~/.notch-pilot/hook.js`.
+
+---
+
+## Build from source
+
+Requires macOS 14+ and Swift 5.9+ (ships with Xcode Command Line Tools).
 
 ```sh
 git clone https://github.com/devmegablaster/Notch-Pilot.git
 cd Notch-Pilot
-./scripts/build.sh            # dist/Notch Pilot.app
-./scripts/make-dmg.sh         # dist/NotchPilot-<version>.dmg
+./scripts/build.sh         # produces dist/Notch Pilot.app
+./scripts/make-dmg.sh      # produces dist/NotchPilot-<version>.dmg
 ```
 
-## Requirements
+No external dependencies. Everything's the standard library + Apple frameworks.
 
-- macOS 14 (Sonoma) or later
-- [Claude Code CLI](https://docs.claude.com/en/docs/claude-code)
-- [Node.js](https://nodejs.org/) on `PATH` (the permission hook is a ~100-line Node script; without it the buddy still shows session activity, just can't intercept prompts)
+---
 
-## How it works
+## Contributing
 
-Notch Pilot watches two things:
-
-1. **`~/.claude/projects/**/*.jsonl`** — Claude Code writes session transcripts here. The app tails the latest file every second, parses the last entry's `tool_use` block, and cross-references it with the live `claude` processes via `libproc` to tell which sessions are actually running.
-2. **A Claude Code hook** auto-installed on first launch in `~/.claude/settings.json`. On `PermissionRequest` / `PreToolUse` / `UserPromptSubmit` it pipes the event over a Unix socket at `~/.notch-pilot/pilot.sock` to the running app. Permission requests block the hook until the user clicks allow or deny.
-
-The UI is an `NSPanel` with an `NSHostingView` hosting SwiftUI, morphing between a collapsed pill and a full panel. The window resizes to fit content so clicks outside the pill pass through to whatever's underneath.
-
-## Privacy
-
-Everything runs locally. No network calls, no telemetry. The app only touches `~/.claude/projects/`, `~/.claude/settings.json`, and `~/.notch-pilot/`.
-
-## Uninstall
-
-1. Quit via the power button in the panel header (or `killall NotchPilot`).
-2. `rm -rf /Applications/Notch\ Pilot.app`
-3. `rm -rf ~/.notch-pilot`
-4. Remove the hook entries from `~/.claude/settings.json` — search for `~/.notch-pilot/hook.js` and delete the surrounding matchers.
+PRs welcome — especially new buddy styles, colors, and platform integrations. See [CONTRIBUTING.md](./CONTRIBUTING.md) for the short guide on adding a new buddy.
 
 ## License
 
