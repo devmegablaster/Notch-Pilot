@@ -45,6 +45,16 @@ final class BuddyPreferences: ObservableObject {
         }
     }
 
+    /// When true, the buddy stays pinned to the notch at all times,
+    /// even with no active Claude session. Off by default — the default
+    /// behavior is to fade out 10s after activity ends and re-appear on
+    /// the next session (or on hover).
+    @Published var alwaysVisible: Bool {
+        didSet {
+            UserDefaults.standard.set(alwaysVisible, forKey: Self.alwaysVisibleKey)
+        }
+    }
+
     /// Master toggle. If off, NOTHING speaks regardless of per-event flags.
     @Published var voiceEnabled: Bool {
         didSet {
@@ -78,15 +88,17 @@ final class BuddyPreferences: ObservableObject {
     private static let colorKey = "notchpilot.color"
     private static let voiceKey = "notchpilot.voice"
     private static let voiceEventsKey = "notchpilot.voice.events"
+    private static let alwaysVisibleKey = "notchpilot.alwaysVisible"
 
     init() {
         let defaults = UserDefaults.standard
         let storedStyle = defaults.string(forKey: Self.styleKey) ?? ""
         let storedColor = defaults.string(forKey: Self.colorKey) ?? ""
         style = BuddyStyle(rawValue: storedStyle) ?? .eyes
-        color = BuddyColor(rawValue: storedColor) ?? .orange
+        color = BuddyColor(rawValue: storedColor) ?? .green
         // Voice master defaults off so new users don't get surprised.
         voiceEnabled = defaults.object(forKey: Self.voiceKey) as? Bool ?? false
+        alwaysVisible = defaults.object(forKey: Self.alwaysVisibleKey) as? Bool ?? true
 
         // Load per-event flags; default each to a sensible value.
         let storedEvents = (defaults.object(forKey: Self.voiceEventsKey) as? [String: Bool]) ?? [:]

@@ -17,6 +17,25 @@ struct NotchContentView: View {
     var onExpandedChange: (Bool) -> Void
 
     @State private var expanded = false
+    @State private var collapseTask: Task<Void, Never>?
+
+    /// Set true while the buddy is doing an "idle peek" — a brief
+    /// random eye-open while pinned in always-visible mode. Drives both
+    /// the buddy mode and the right-side status text.
+    @State private var idlePeekActive = false
+    @State private var idleMessage = "zzz…"
+    @State private var idlePeekTask: Task<Void, Never>?
+
+    private static let idleMessages: [String] = [
+        "zzz…",
+        "snoozin",
+        "standby",
+        "ready",
+        "waiting",
+        "all clear",
+        "lurking",
+        "idle",
+    ]
     // Synchronously-controlled visibility. Set to true the moment activity
     // appears; only set back to false after the fade-out delay elapses with
     // no fresh activity. Decoupled from `hasAnyActivity` so we don't race
@@ -57,7 +76,8 @@ struct NotchContentView: View {
         //     don't rip it out from under them just because the cursor
         //     moved out of the notch hit rect into the panel body)
         //   - The appearance picker overlay is open
-        displayedVisible
+        prefs.alwaysVisible
+            || displayedVisible
             || mouseMonitor.isHoveringNotch
             || expanded
             || showingAppearancePicker
@@ -92,6 +112,7 @@ struct NotchContentView: View {
 
         if displayedVisible { return .content }  // "all done" glow
         if mouseMonitor.isHoveringNotch { return .idle }  // hover summon
+        if idlePeekActive { return .idle }                // random "peek"
         return .sleeping
     }
 
@@ -111,6 +132,11 @@ struct NotchContentView: View {
         }
         if mouseMonitor.isHoveringNotch {
             return "hi"
+        }
+        // Pinned-but-idle: rotate through cute idle messages so the
+        // buddy doesn't look frozen on always-visible mode.
+        if prefs.alwaysVisible && !hasAnyActivity {
+            return idleMessage
         }
         return ""
     }
@@ -229,6 +255,53 @@ struct NotchContentView: View {
         }
         .onAppear {
             onCollapsedSizeChange(collapsedWidth)
+            startIdlePeekLoop()
+        }
+    }
+
+    // MARK: - Idle peek loop
+
+    /// Background loop that — only when always-visible is on and the
+    /// app is fully idle — periodically opens the buddy's eyes for a
+    /// brief "peek", swaps in a new idle message, then closes them
+    /// again. Random gaps so it doesn't feel mechanical.
+    private func startIdlePeekLoop() {
+        idlePeekTask?.cancel()
+        idlePeekTask = Task { @MainActor in
+            // Wait a bit on launch so the loop doesn't fire while the
+            // onboarding intro is still playing.
+            try? await Task.sleep(for: .seconds(8))
+            while !Task.isCancelled {
+                let waitMs = UInt64.random(in: 28_000 ... 75_000)
+                try? await Task.sleep(for: .milliseconds(Int(waitMs)))
+                if Task.isCancelled { return }
+
+                // Only peek when always-visible is on AND nothing else
+                // is going on — no active session, no permission, not
+                // already shown via hover or expansion.
+                let canPeek = prefs.alwaysVisible
+                    && !hasAnyActivity
+                    && !hasPendingPermission
+                    && !mouseMonitor.isHoveringNotch
+                    && !expanded
+                guard canPeek else { continue }
+
+                // Rotate to a fresh idle message right before the peek
+                // so the user sees both eyes open AND new text.
+                idleMessage = Self.idleMessages.randomElement() ?? "zzz…"
+
+                withAnimation(.easeOut(duration: 0.45)) {
+                    idlePeekActive = true
+                }
+
+                // Hold the peek for ~1.6s so it reads.
+                try? await Task.sleep(for: .milliseconds(1600))
+                if Task.isCancelled { return }
+
+                withAnimation(.easeIn(duration: 0.4)) {
+                    idlePeekActive = false
+                }
+            }
         }
     }
 
@@ -272,7 +345,13 @@ struct NotchContentView: View {
         .background(shape.fill(Color.black))
         .contentShape(shape)
         .onHover { hovering in
-            if hovering { expanded = true }
+            if hovering {
+                // Cancel any pending collapse — the user came back before
+                // the debounce fired, so stay shown.
+                collapseTask?.cancel()
+                collapseTask = nil
+                expanded = true
+            }
         }
         .contextMenu {
             Button("Quit Notch Pilot") { NSApp.terminate(nil) }
@@ -333,7 +412,25 @@ struct NotchContentView: View {
             // Don't collapse while the picker overlay is up — the user may
             // be moving the mouse toward a swatch that's offset from the
             // header and onHover fires a false positive.
-            if !hovering && !showingAppearancePicker { expanded = false }
+            if hovering {
+                // Cursor came back — cancel any pending collapse.
+                collapseTask?.cancel()
+                collapseTask = nil
+                return
+            }
+            guard !showingAppearancePicker else { return }
+
+            // Debounce the collapse. At the edge of the panel's rounded
+            // shape the hover state can flip in/out as the window resizes
+            // between collapsed and expanded, which produced a rapid
+            // flicker loop. Waiting 220ms before actually collapsing
+            // lets transient "not hovering" reports settle.
+            collapseTask?.cancel()
+            collapseTask = Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(220))
+                if Task.isCancelled { return }
+                expanded = false
+            }
         }
         .onChange(of: expanded) { _, isExpanded in
             // Closing the panel closes the picker too.
@@ -1329,7 +1426,48 @@ struct NotchContentView: View {
                 .fill(Color.white.opacity(0.08))
                 .frame(height: 1)
 
+            behaviorSection
+
+            Rectangle()
+                .fill(Color.white.opacity(0.08))
+                .frame(height: 1)
+
             soundSection
+        }
+    }
+
+    /// Behaviour toggles — things that change how the panel behaves,
+    /// separate from appearance or sound.
+    private var behaviorSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("BEHAVIOR")
+                .font(.system(size: 9, weight: .bold, design: .rounded))
+                .tracking(0.7)
+                .foregroundColor(.white.opacity(0.45))
+
+            HStack(spacing: 10) {
+                Image(systemName: prefs.alwaysVisible ? "pin.fill" : "pin.slash")
+                    .font(.system(size: 12))
+                    .foregroundColor(prefs.alwaysVisible ? accent : .white.opacity(0.4))
+                    .frame(width: 16)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Always visible")
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .foregroundColor(.white.opacity(0.9))
+                    Text("Keep the buddy pinned even when Claude is idle")
+                        .font(.system(size: 10, design: .rounded))
+                        .foregroundColor(.white.opacity(0.45))
+                }
+
+                Spacer()
+
+                Toggle("", isOn: $prefs.alwaysVisible)
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .tint(accent)
+                    .labelsHidden()
+            }
         }
     }
 
