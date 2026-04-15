@@ -21,7 +21,7 @@ enum TerminalJumper {
     private static let terminalExecutableNames: Set<String> = [
         "Terminal",
         "iTerm2", "iTerm",
-        "Alacritty",
+        "Alacritty", "alacritty",
         "Ghostty", "ghostty",
         "kitty",
         "Warp", "stable",          // Warp reports as "stable"
@@ -31,21 +31,147 @@ enum TerminalJumper {
         "tabby",
     ]
 
-    /// Jump to the terminal window hosting the claude process running with
-    /// the given current working directory.
+    /// Known terminal bundle identifiers — used as a fallback when the
+    /// parent-chain walk can't find a terminal (e.g. because Claude is
+    /// running inside tmux, which detaches its server from the host
+    /// terminal). In that case we can't identify *which* terminal has
+    /// the tmux pane, so we just activate any running terminal app.
+    private static let terminalBundleIDs: Set<String> = [
+        "com.apple.Terminal",
+        "com.googlecode.iterm2",
+        "org.alacritty",
+        "io.alacritty",
+        "com.mitchellh.ghostty",
+        "net.kovidgoyal.kitty",
+        "dev.warp.Warp-Stable",
+        "com.github.wez.wezterm",
+        "co.zeit.hyper",
+        "com.raphaelamorim.rio",
+        "org.tabby",
+    ]
+
+    /// Jump to the terminal window hosting the claude process running
+    /// with the given current working directory.
+    ///
+    /// Strategy (best → worst):
+    /// 1. If claude is running inside tmux, navigate tmux to the exact
+    ///    pane *before* activating the terminal app, so the user lands
+    ///    on the right pane.
+    /// 2. Walk claude's parent chain to find an ancestor terminal app
+    ///    and activate it (works for direct-launch setups).
+    /// 3. Fall back to activating any running terminal app by bundle
+    ///    ID (covers tmux/screen + unusual launch chains).
     static func jump(toCwd cwd: String) {
         guard let claudePID = findClaudePID(cwd: cwd) else {
             print("[NotchPilot] No claude process with cwd \(cwd)")
             return
         }
-        guard let terminalPID = findTerminalAncestor(startingAt: claudePID) else {
-            print("[NotchPilot] No terminal ancestor for pid \(claudePID)")
+
+        // Step 1: tmux pane navigation (best effort, no-op if not tmux).
+        if selectTmuxPane(forClaudePID: claudePID) {
+            print("[NotchPilot] Switched tmux to the pane running claude")
+        }
+
+        // Step 2: parent-chain terminal activation.
+        if let terminalPID = findTerminalAncestor(startingAt: claudePID),
+           let app = NSRunningApplication(processIdentifier: terminalPID) {
+            app.activate()
+            print("[NotchPilot] Activated \(app.localizedName ?? "terminal") (parent chain)")
             return
         }
-        if let app = NSRunningApplication(processIdentifier: terminalPID) {
+
+        // Step 3: fallback — any running terminal app.
+        if let app = fallbackTerminalApp() {
             app.activate()
-            print("[NotchPilot] Activated \(app.localizedName ?? "terminal") for session at \(cwd)")
+            print("[NotchPilot] Activated \(app.localizedName ?? "terminal") (bundle-ID fallback)")
+            return
         }
+
+        print("[NotchPilot] No terminal ancestor for pid \(claudePID) and no terminal app running")
+    }
+
+    // MARK: - tmux pane navigation
+
+    /// If tmux is installed and has a pane whose pid sits in claude's
+    /// parent chain, select that pane (and its window). Returns true
+    /// when a pane was selected. Silently no-ops otherwise.
+    private static func selectTmuxPane(forClaudePID claudePID: Int32) -> Bool {
+        guard let tmuxPath = findTmux() else { return false }
+
+        // Collect claude's ancestor PIDs — every pane that hosts claude
+        // will have its `pane_pid` (the shell) somewhere in this set.
+        var ancestors: Set<Int32> = []
+        var current = claudePID
+        for _ in 0..<16 {
+            guard let parent = ProcessLookup.parent(of: current), parent > 1 else { break }
+            ancestors.insert(parent)
+            current = parent
+        }
+        guard !ancestors.isEmpty else { return false }
+
+        // list-panes -a: every pane in every session on the default
+        // socket. Format: "session:window.pane pid".
+        guard let listing = runProcess(
+            tmuxPath,
+            ["list-panes", "-a", "-F", "#{session_name}:#{window_index}.#{pane_index} #{pane_pid}"]
+        ) else { return false }
+
+        var target: String?
+        for line in listing.split(whereSeparator: \.isNewline) {
+            let parts = line.split(separator: " ", maxSplits: 1)
+            guard parts.count == 2,
+                  let pid = Int32(parts[1].trimmingCharacters(in: .whitespaces))
+            else { continue }
+            if ancestors.contains(pid) {
+                target = String(parts[0])
+                break
+            }
+        }
+
+        guard let t = target else { return false }
+
+        _ = runProcess(tmuxPath, ["select-window", "-t", t])
+        _ = runProcess(tmuxPath, ["select-pane", "-t", t])
+        return true
+    }
+
+    private static func findTmux() -> String? {
+        let candidates = [
+            "/opt/homebrew/bin/tmux",   // Apple Silicon Homebrew
+            "/usr/local/bin/tmux",      // Intel Homebrew
+            "/usr/bin/tmux",            // system (rare)
+        ]
+        for path in candidates where FileManager.default.fileExists(atPath: path) {
+            return path
+        }
+        return nil
+    }
+
+    private static func runProcess(_ path: String, _ args: [String]) -> String? {
+        let task = Process()
+        task.launchPath = path
+        task.arguments = args
+        let out = Pipe()
+        task.standardOutput = out
+        task.standardError = Pipe()
+        do {
+            try task.run()
+            task.waitUntilExit()
+        } catch {
+            return nil
+        }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8)
+    }
+
+    private static func fallbackTerminalApp() -> NSRunningApplication? {
+        for app in NSWorkspace.shared.runningApplications {
+            guard let bid = app.bundleIdentifier else { continue }
+            if terminalBundleIDs.contains(bid) {
+                return app
+            }
+        }
+        return nil
     }
 
     // MARK: - Process enumeration
