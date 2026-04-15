@@ -8,6 +8,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let hookBridge = HookBridge()
     private let preferences = BuddyPreferences()
     private let heatmap = HeatmapAggregator()
+    private let usage = UsageAggregator()
+    private let speechController = SpeechController()
     private var mouseMonitor: MouseMonitor?
 
     /// UserDefaults key — set to `true` after the onboarding sequence
@@ -46,7 +48,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             hookBridge: hookBridge,
             preferences: preferences,
             heatmap: heatmap,
-            mouseMonitor: mm
+            usage: usage,
+            mouseMonitor: mm,
+            speechController: speechController
         )
         window?.show()
         monitor.start()

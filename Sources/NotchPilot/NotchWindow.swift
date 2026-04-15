@@ -5,16 +5,19 @@ final class NotchWindow: NSPanel {
     private let notchWidth: CGFloat
     private let notchHeight: CGFloat
 
-    // Cached geometry for the last-requested collapsed pill size so the
-    // window can follow text-width changes as Claude's status evolves.
-    private var lastCollapsedWidth: CGFloat = 0
+    // Cached geometry for the last-requested collapsed pill size so
+    // the window can follow width and height changes — width for
+    // status-text length, height for the speech pop-out.
+    private var lastCollapsedSize: CGSize = .zero
 
     init(
         monitor: ClaudeMonitor,
         hookBridge: HookBridge,
         preferences: BuddyPreferences,
         heatmap: HeatmapAggregator,
-        mouseMonitor: MouseMonitor
+        usage: UsageAggregator,
+        mouseMonitor: MouseMonitor,
+        speechController: SpeechController
     ) {
         guard let screen = NSScreen.main else {
             fatalError("no main screen")
@@ -66,14 +69,16 @@ final class NotchWindow: NSPanel {
             monitor: monitor,
             hookBridge: hookBridge,
             heatmap: heatmap,
+            usage: usage,
             mouseMonitor: mouseMonitor,
+            speechController: speechController,
             notchWidth: notchWidth,
             notchHeight: notchHeight,
             onVisibilityChange: { [weak self] visible in
                 self?.setVisible(visible)
             },
-            onCollapsedSizeChange: { [weak self] width in
-                self?.updateCollapsed(width: width)
+            onCollapsedSizeChange: { [weak self] size in
+                self?.updateCollapsed(size: size)
             },
             onExpandedChange: { [weak self] expanded in
                 self?.updateExpanded(expanded)
@@ -106,28 +111,19 @@ final class NotchWindow: NSPanel {
 
     // MARK: - Frame helpers
 
-    private func collapsedFrame(width: CGFloat) -> NSRect {
+    private func collapsedFrame(size: CGSize) -> NSRect {
         guard let screen = NSScreen.main else { return .zero }
         let screenFrame = screen.frame
-        // Horizontally center the physical notch, not the window. The left
-        // section of the pill is `leftSectionWidth` (56) wide and sits to
-        // the left of the notch, so we shift the window origin left by
-        // (leftSectionWidth + notchWidth/2) from screen center.
+        // Horizontally center the physical notch, not the window. The
+        // left section of the pill is `leftSectionWidth` (56) wide and
+        // sits to the left of the notch, so we shift the window origin
+        // left by (leftSectionWidth + notchWidth/2) from screen center.
+        // Speech pop-outs keep the same horizontal footprint — only
+        // the height changes — so the offset is identical.
         let leftSection: CGFloat = 56
         let x = screenFrame.midX - leftSection - notchWidth / 2
-        let y = screenFrame.maxY - notchHeight
-        return NSRect(x: x, y: y, width: width, height: notchHeight)
-    }
-
-    /// Same as `collapsedFrame` but pushed above the visible screen edge so
-    /// it can slide DOWN into position on appear and slide UP on hide.
-    private func hiddenFrame(width: CGFloat) -> NSRect {
-        guard let screen = NSScreen.main else { return .zero }
-        var f = collapsedFrame(width: width)
-        // Move the window's top up by ~1.5x its own height so the entire
-        // pill is above the screen edge before the slide-down begins.
-        f.origin.y = screen.frame.maxY + notchHeight * 0.6
-        return f
+        let y = screenFrame.maxY - size.height
+        return NSRect(x: x, y: y, width: size.width, height: size.height)
     }
 
     private func expandedFrame() -> NSRect {
@@ -161,19 +157,26 @@ final class NotchWindow: NSPanel {
         }
     }
 
-    private func updateCollapsed(width: CGFloat) {
-        lastCollapsedWidth = width
+    private func updateCollapsed(size: CGSize) {
+        lastCollapsedSize = size
         // Only apply if we're currently in the collapsed state. The
         // expanded-frame callback owns the frame while expanded.
         let currentFrame = self.frame
         let expected = expandedFrame()
         if currentFrame.size != expected.size {
-            setFrame(collapsedFrame(width: width), display: true, animate: false)
+            // Animate so the speech pop-out physically grows rather
+            // than hard-resizing to its new frame.
+            let target = collapsedFrame(size: size)
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.28
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                self.animator().setFrame(target, display: true)
+            }
         }
     }
 
     private func updateExpanded(_ expanded: Bool) {
-        let target = expanded ? expandedFrame() : collapsedFrame(width: lastCollapsedWidth)
+        let target = expanded ? expandedFrame() : collapsedFrame(size: lastCollapsedSize)
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.22
             ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)

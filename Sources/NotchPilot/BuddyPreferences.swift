@@ -3,6 +3,28 @@ import ServiceManagement
 
 /// Categories of events the buddy can announce out loud. Each has its own
 /// toggle in preferences so the user can enable just the noise they want.
+/// Events that can cause the buddy to pop out of the notch and say
+/// something. Each case has its own preference toggle so users can
+/// mute individual triggers. Add cases here as new speech kinds are
+/// added to `SpeechKind`.
+enum SpeechEvent: String, CaseIterable, Identifiable {
+    case sessionFinished
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .sessionFinished: return "Session finished"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .sessionFinished: return "checkmark.circle.fill"
+        }
+    }
+}
+
 enum VoiceEvent: String, CaseIterable, Identifiable {
     case permission
     case danger
@@ -66,6 +88,45 @@ final class BuddyPreferences: ObservableObject {
         }
     }
 
+    /// When true, the buddy fires a subtle haptic tick through the
+    /// trackpad whenever the notch panel opens or closes. Only works
+    /// on devices with a Force Touch trackpad; external mouse/keyboard
+    /// users get nothing. Defaults on.
+    @Published var hapticsEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(hapticsEnabled, forKey: Self.hapticsKey)
+        }
+    }
+
+    /// Master toggle for speech — when off, no event can trigger a
+    /// buddy pop-out regardless of per-event flags. Defaults on.
+    @Published var speechEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(speechEnabled, forKey: Self.speechKey)
+        }
+    }
+
+
+    /// Per-event speech toggles.
+    @Published var speechEvents: [SpeechEvent: Bool] {
+        didSet {
+            let raw = speechEvents.reduce(into: [String: Bool]()) { acc, pair in
+                acc[pair.key.rawValue] = pair.value
+            }
+            UserDefaults.standard.set(raw, forKey: Self.speechEventsKey)
+        }
+    }
+
+    func speechAllows(_ event: SpeechEvent) -> Bool {
+        speechEnabled && (speechEvents[event] ?? true)
+    }
+
+    func setSpeechEvent(_ event: SpeechEvent, _ enabled: Bool) {
+        var copy = speechEvents
+        copy[event] = enabled
+        speechEvents = copy
+    }
+
     /// Pushes the current `startAtLogin` value to macOS via SMAppService.
     /// Idempotent: safe to call repeatedly. Logs and continues on
     /// failure (e.g. when running from a non-bundled `swift run` build
@@ -124,6 +185,9 @@ final class BuddyPreferences: ObservableObject {
     private static let voiceEventsKey = "notchpilot.voice.events"
     private static let alwaysVisibleKey = "notchpilot.alwaysVisible"
     private static let startAtLoginKey = "notchpilot.startAtLogin"
+    private static let hapticsKey = "notchpilot.haptics"
+    private static let speechKey = "notchpilot.speech"
+    private static let speechEventsKey = "notchpilot.speech.events"
 
     init() {
         let defaults = UserDefaults.standard
@@ -135,6 +199,15 @@ final class BuddyPreferences: ObservableObject {
         voiceEnabled = defaults.object(forKey: Self.voiceKey) as? Bool ?? false
         alwaysVisible = defaults.object(forKey: Self.alwaysVisibleKey) as? Bool ?? true
         startAtLogin = defaults.object(forKey: Self.startAtLoginKey) as? Bool ?? true
+        hapticsEnabled = defaults.object(forKey: Self.hapticsKey) as? Bool ?? true
+        speechEnabled = defaults.object(forKey: Self.speechKey) as? Bool ?? true
+
+        let storedSpeechEvents = (defaults.object(forKey: Self.speechEventsKey) as? [String: Bool]) ?? [:]
+        var se: [SpeechEvent: Bool] = [:]
+        for event in SpeechEvent.allCases {
+            se[event] = storedSpeechEvents[event.rawValue] ?? true
+        }
+        speechEvents = se
 
         // Load per-event flags; default each to a sensible value.
         let storedEvents = (defaults.object(forKey: Self.voiceEventsKey) as? [String: Bool]) ?? [:]

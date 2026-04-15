@@ -5,7 +5,9 @@ struct NotchContentView: View {
     @ObservedObject var monitor: ClaudeMonitor
     @ObservedObject var hookBridge: HookBridge
     @ObservedObject var heatmap: HeatmapAggregator
+    @ObservedObject var usage: UsageAggregator
     @ObservedObject var mouseMonitor: MouseMonitor
+    @ObservedObject var speechController: SpeechController
     @EnvironmentObject var prefs: BuddyPreferences
     let notchWidth: CGFloat
     let notchHeight: CGFloat
@@ -13,7 +15,7 @@ struct NotchContentView: View {
     // Callbacks up to the owning NSPanel so it can resize/show in sync
     // with the view's logical state.
     var onVisibilityChange: (Bool) -> Void
-    var onCollapsedSizeChange: (CGFloat) -> Void
+    var onCollapsedSizeChange: (CGSize) -> Void
     var onExpandedChange: (Bool) -> Void
 
     @State private var expanded = false
@@ -40,6 +42,25 @@ struct NotchContentView: View {
     @State private var fadeOutToken = UUID()
     @State private var filterQuery: String = ""
     @State private var showingAppearancePicker = false
+    /// The most recent session we've seen actively working. Captured
+    /// on every monitor tick while an active session exists, so when
+    /// the claude process exits and the session drops out of
+    /// `monitor.sessions` entirely we can still look up which one it
+    /// was for the session-finished speech.
+    @State private var lastSeenActiveSession: ClaudeSession?
+
+    /// IDs of sessions currently in the "active" state (non-empty
+    /// shortStatus). Used to detect per-session transitions from
+    /// active → inactive so we can fire a speech for every session
+    /// that completes, not just when all sessions are idle.
+    @State private var activeSessionIDs: Set<String> = []
+
+    /// Snapshot of sessions from the previous monitor tick. When the
+    /// set of active IDs shrinks, we look up the finished session here
+    /// to grab its project name (since the session may have already
+    /// dropped out of `monitor.sessions` in the newer snapshot).
+    @State private var previousSessions: [String: ClaudeSession] = [:]
+
     private let fadeOutDuration: TimeInterval = 10
 
     private let leftSectionWidth: CGFloat = 56
@@ -78,6 +99,29 @@ struct NotchContentView: View {
             || expanded
             || showingAppearancePicker
             || inspectedSession != nil
+            || speechController.current != nil
+            || usageDetailShown
+    }
+
+    /// True while the buddy is doing a speech pop-out. Drives the
+    /// collapsed-view mode swap and the window frame's height.
+    private var isSpeaking: Bool {
+        speechController.current != nil
+    }
+
+    /// Extra vertical space added to the pill while the buddy is
+    /// speaking, to fit a title+subtitle row below the notch area.
+    private let speechExtraHeight: CGFloat = 44
+
+    private var speechPillHeight: CGFloat {
+        notchHeight + speechExtraHeight
+    }
+
+    private var collapsedSize: CGSize {
+        if isSpeaking {
+            return CGSize(width: collapsedWidth, height: speechPillHeight)
+        }
+        return CGSize(width: collapsedWidth, height: notchHeight)
     }
 
     private var hasPendingPermission: Bool {
@@ -138,6 +182,14 @@ struct NotchContentView: View {
         return ""
     }
 
+    /// True when the right-side status text is in an idle/snoozing
+    /// state — used to render it in subdued grey instead of white.
+    private var isIdleStatus: Bool {
+        activeCount == 0
+            && !mouseMonitor.isHoveringNotch
+            && !displayedVisible
+    }
+
     private var rightSectionWidth: CGFloat {
         let font = NSFont.systemFont(ofSize: 11, weight: .medium)
         let measured = (currentStatus as NSString)
@@ -150,6 +202,21 @@ struct NotchContentView: View {
         leftSectionWidth + notchWidth + rightSectionWidth
     }
 
+    /// Anchor point for the collapsed pill's open/close scale transition,
+    /// expressed in the pill's own unit coordinate space. Points at the
+    /// top edge of the pill right where the physical notch lives, so the
+    /// pill looks like it's emerging from / retracting into the notch.
+    private var collapsedNotchAnchor: UnitPoint {
+        let notchCenterX = leftSectionWidth + notchWidth / 2
+        let x = collapsedWidth > 0 ? notchCenterX / collapsedWidth : 0.5
+        return UnitPoint(x: x, y: 0)
+    }
+
+    /// Anchor for the expanded panel's open/close scale transition.
+    /// The expanded panel is centered on the notch horizontally, so
+    /// 0.5 is exactly right.
+    private let expandedNotchAnchor = UnitPoint(x: 0.5, y: 0)
+
     // MARK: - Body
 
     var body: some View {
@@ -157,18 +224,30 @@ struct NotchContentView: View {
             if shouldShow {
                 if hasPendingPermission, let permission = hookBridge.pendingPermission {
                     permissionPanel(permission)
-                        .transition(.opacity)
+                        .transition(
+                            .scale(scale: 0.04, anchor: expandedNotchAnchor)
+                            .combined(with: .opacity)
+                        )
                 } else if expanded {
                     expandedPanel
-                        .transition(.opacity)
+                        .transition(
+                            .scale(scale: 0.04, anchor: expandedNotchAnchor)
+                            .combined(with: .opacity)
+                        )
+                } else if let speech = speechController.current {
+                    speechPill(speech)
+                        .transition(
+                            .scale(scale: 0.15, anchor: collapsedNotchAnchor)
+                            .combined(with: .opacity)
+                        )
                 } else {
                     collapsedPill
-                        // Scale toward the center (where the notch lives) as
-                        // we fade, so the left eye and right text appear to
-                        // collapse INTO the notch on hide and grow OUT of
-                        // the notch on show.
+                        // Scale toward the notch (where the physical
+                        // cutout lives — not the pill's geometric
+                        // center, which is offset when the right-side
+                        // text pill is wider than the left eye).
                         .transition(
-                            .scale(scale: 0.05, anchor: .center)
+                            .scale(scale: 0.04, anchor: collapsedNotchAnchor)
                             .combined(with: .opacity)
                         )
                 }
@@ -177,6 +256,14 @@ struct NotchContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .animation(.easeOut(duration: 0.18), value: effectivelyExpanded)
         .animation(.spring(response: 0.45, dampingFraction: 0.82), value: shouldShow)
+        // Animate the branch swap between collapsedPill and speechPill
+        // so the pop-out scales in/out smoothly instead of just
+        // replacing the view. Keyed on the speech identity so every
+        // distinct speech retriggers the transition.
+        .animation(
+            .spring(response: 0.5, dampingFraction: 0.72),
+            value: speechController.current?.id
+        )
         .onChange(of: hasAnyActivity, initial: true) { _, isActive in
             if isActive {
                 // Activity present — show immediately and invalidate any
@@ -203,16 +290,28 @@ struct NotchContentView: View {
             if newValue {
                 // Re-push the current size in case the window was collapsed
                 // while invisible — onAppear only fires once.
-                onCollapsedSizeChange(collapsedWidth)
+                onCollapsedSizeChange(collapsedSize)
             } else {
                 expanded = false
             }
         }
         .onChange(of: effectivelyExpanded) { _, newValue in
             onExpandedChange(newValue)
+            // Haptic tick on panel open/close. This is the canonical
+            // "the notch just did something" state — fires on hover,
+            // un-hover, permission arrival, permission resolved. Uses
+            // `.levelChange` (most pronounced of the three patterns)
+            // with `.drawCompleted` so the tick lands exactly when
+            // the frame change becomes visible.
+            if prefs.hapticsEnabled {
+                NSHapticFeedbackManager.defaultPerformer.perform(
+                    .levelChange,
+                    performanceTime: .drawCompleted
+                )
+            }
         }
-        .onChange(of: collapsedWidth) { _, newValue in
-            onCollapsedSizeChange(newValue)
+        .onChange(of: collapsedSize) { _, newSize in
+            onCollapsedSizeChange(newSize)
         }
         .onChange(of: hookBridge.pendingPermission?.id) { oldID, newID in
             if oldID != nil && newID == nil {
@@ -226,6 +325,53 @@ struct NotchContentView: View {
                 )
             }
         }
+        .onChange(of: monitor.sessions, initial: true) { _, newSessions in
+            // Build the new set of active session IDs.
+            let nowActive = Set(
+                newSessions.filter { !$0.shortStatus.isEmpty }.map(\.id)
+            )
+
+            // Detect per-session active → inactive transitions. This
+            // is the key — each individual session completion fires a
+            // speech, not only when everything goes idle. Look the
+            // finished session up from either the current snapshot OR
+            // the previous one (in case it dropped out entirely).
+            let justFinished = activeSessionIDs.subtracting(nowActive)
+            for finishedID in justFinished {
+                let session = newSessions.first(where: { $0.id == finishedID })
+                    ?? previousSessions[finishedID]
+                    ?? lastSeenActiveSession
+                if prefs.speechAllows(.sessionFinished), let s = session {
+                    speechController.speak(
+                        kind: .sessionFinished,
+                        // Minute-bucketed key so back-to-back completions
+                        // on the same session (rare but possible) don't
+                        // all dedup into a single speech.
+                        key: "sess-\(finishedID)-\(Int(Date().timeIntervalSince1970 / 60))",
+                        title: s.projectName,
+                        subtitle: "done",
+                        icon: "checkmark.circle.fill",
+                        tint: .accent
+                    )
+                }
+            }
+
+            activeSessionIDs = nowActive
+
+            // Rebuild the session-ID → session lookup for the next tick.
+            var snapshot: [String: ClaudeSession] = [:]
+            for s in newSessions { snapshot[s.id] = s }
+            previousSessions = snapshot
+
+            // Also maintain lastSeenActiveSession as a last-resort fallback.
+            if let active = newSessions.first(where: { !$0.shortStatus.isEmpty }) {
+                lastSeenActiveSession = active
+            } else if let mostRecent = newSessions.max(
+                by: { $0.lastActivity < $1.lastActivity }
+            ) {
+                lastSeenActiveSession = mostRecent
+            }
+        }
         .onChange(of: workingSession?.toolAction) { oldAction, newAction in
             if newAction == .danger && oldAction != .danger {
                 VoiceAnnouncer.shared.speak(
@@ -237,6 +383,10 @@ struct NotchContentView: View {
         }
         .onChange(of: hasAnyActivity) { oldValue, newValue in
             if oldValue == true && newValue == false {
+                // Voice announcer only — the buddy speech bubble is
+                // fired per-session from the monitor.sessions onChange
+                // above, not here. This block is just for the "all
+                // done" voice cue when everything goes idle.
                 VoiceAnnouncer.shared.speak(
                     "Claude finished",
                     event: .finished,
@@ -251,7 +401,7 @@ struct NotchContentView: View {
             }
         }
         .onAppear {
-            onCollapsedSizeChange(collapsedWidth)
+            onCollapsedSizeChange(collapsedSize)
             startIdlePeekLoop()
         }
     }
@@ -298,6 +448,82 @@ struct NotchContentView: View {
         }
     }
 
+    // MARK: - Speech pill
+
+    /// The "buddy popping out of the notch to say something" view.
+    /// Same horizontal footprint as the collapsed pill so the notch
+    /// cutout stays in the exact same place — only the vertical axis
+    /// grows. The buddy moves from its usual left-of-notch spot to
+    /// the center of the notch, and a title + subtitle drop in below.
+    private func speechPill(_ speech: BuddySpeech) -> some View {
+        let w = collapsedWidth
+        let h = speechPillHeight
+        let cornerRadius = notchHeight * 0.55
+        let shape = UnevenRoundedRectangle(
+            topLeadingRadius: 0,
+            bottomLeadingRadius: cornerRadius,
+            bottomTrailingRadius: cornerRadius,
+            topTrailingRadius: 0,
+            style: .continuous
+        )
+        let tint: Color = {
+            switch speech.tint {
+            case .accent:  return accent
+            case .danger:  return Color(red: 0.97, green: 0.56, blue: 0.56)
+            case .neutral: return .white.opacity(0.7)
+            }
+        }()
+
+        // Offset the lower text block so it sits centered under the
+        // physical notch, not the geometric center of the pill.
+        let notchCenterX = leftSectionWidth + notchWidth / 2
+        let textOffsetX = notchCenterX - w / 2
+
+        return VStack(spacing: 5) {
+            // Top row: same 3-section layout as the collapsed pill,
+            // but the buddy lives INSIDE the notch section instead
+            // of on the right edge of the left section.
+            HStack(spacing: 0) {
+                Color.clear
+                    .frame(width: leftSectionWidth, height: notchHeight)
+
+                BuddyFace(mode: .content, size: 10)
+                    .frame(width: notchWidth, height: notchHeight)
+
+                Color.clear
+                    .frame(width: rightSectionWidth, height: notchHeight)
+            }
+
+            // Below: project name + status word, centered under the
+            // notch by offsetting the whole text block horizontally.
+            VStack(spacing: 1) {
+                HStack(spacing: 5) {
+                    Image(systemName: speech.icon)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(tint)
+                    Text(speech.title)
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Text(speech.subtitle)
+                    .font(.system(size: 10, weight: .medium, design: .rounded))
+                    .foregroundColor(tint.opacity(0.85))
+                    .lineLimit(1)
+            }
+            .offset(x: textOffsetX)
+
+            Spacer(minLength: 0)
+        }
+        .frame(width: w, height: h, alignment: .top)
+        .background(shape.fill(Color.black))
+        .contentShape(shape)
+        .contextMenu {
+            Button("Quit Notch Pilot") { NSApp.terminate(nil) }
+        }
+    }
+
     // MARK: - Collapsed pill
 
     private var collapsedPill: some View {
@@ -322,11 +548,18 @@ struct NotchContentView: View {
             Color.clear
                 .frame(width: notchWidth, height: notchHeight)
 
-            // Right section: status text anchored to the left edge
+            // Right section: status text anchored to the left edge.
+            // Dim to a subdued grey when the notch is idle ("zzz…")
+            // so it doesn't scream for attention; bright white while
+            // there's actual activity.
             HStack(spacing: 0) {
                 Text(currentStatus)
                     .font(.system(size: 11, weight: .medium, design: .rounded))
-                    .foregroundColor(.white.opacity(0.92))
+                    .foregroundColor(
+                        isIdleStatus
+                            ? .white.opacity(0.35)
+                            : .white.opacity(0.92)
+                    )
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .padding(.leading, rightPillHorizontalPadding)
@@ -408,8 +641,33 @@ struct NotchContentView: View {
                     )
             }
         }
+        .overlay(alignment: .top) {
+            // Usage detail popover hoisted to the panel-level overlay
+            // so it draws above the session list in z-order. Tapping
+            // outside the card dismisses (backdrop) — the card itself
+            // swallows taps via its own onTapGesture.
+            if usageDetailShown {
+                ZStack(alignment: .top) {
+                    // Explicit Rectangle sized to the panel so the
+                    // tap-to-dismiss hit area covers everything that
+                    // isn't the popover card.
+                    Rectangle()
+                        .fill(Color.black.opacity(0.4))
+                        .frame(width: expandedWidth, height: expandedHeight)
+                        .contentShape(Rectangle())
+                        .onTapGesture { usageDetailShown = false }
+                    usageDetailPopover
+                        .padding(.top, max(notchHeight, 14) + 52)
+                        .transition(
+                            .opacity
+                            .combined(with: .scale(scale: 0.94, anchor: .top))
+                        )
+                }
+            }
+        }
         .animation(.easeOut(duration: 0.18), value: showingAppearancePicker)
         .animation(.easeOut(duration: 0.18), value: inspectedSession?.id)
+        .animation(.easeOut(duration: 0.15), value: usageDetailShown)
         .contentShape(shape)
         .onHover { hovering in
             // Don't collapse while the picker overlay is up — the user may
@@ -421,7 +679,10 @@ struct NotchContentView: View {
                 collapseTask = nil
                 return
             }
-            guard !showingAppearancePicker && inspectedSession == nil else { return }
+            guard !showingAppearancePicker
+                    && inspectedSession == nil
+                    && !usageDetailShown
+            else { return }
 
             // Debounce the collapse. At the edge of the panel's rounded
             // shape the hover state can flip in/out as the window resizes
@@ -826,9 +1087,41 @@ struct NotchContentView: View {
 
     private var heatmapSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                sectionLabel("Today", count: nil)
+            HStack(spacing: 6) {
+                sectionLabel(heatmapDayLabel, count: nil)
+
+                // Prev-day button — always enabled
+                Button {
+                    heatmap.advanceDay(by: -1)
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.white.opacity(0.6))
+                        .frame(width: 16, height: 16)
+                        .background(Circle().fill(Color.white.opacity(0.08)))
+                }
+                .buttonStyle(.plain)
+                .help("Previous day")
+
+                // Next-day button — disabled (dimmed) when already
+                // viewing today, since we don't scan future days.
+                Button {
+                    heatmap.advanceDay(by: 1)
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(heatmap.isViewingToday
+                            ? .white.opacity(0.2)
+                            : .white.opacity(0.6))
+                        .frame(width: 16, height: 16)
+                        .background(Circle().fill(Color.white.opacity(0.08)))
+                }
+                .buttonStyle(.plain)
+                .disabled(heatmap.isViewingToday)
+                .help("Next day")
+
                 Spacer()
+
                 // Header text doubles as a heatmap tooltip — when no
                 // cell is hovered it shows the day's total; when one
                 // is hovered it shows that hour's count.
@@ -908,16 +1201,21 @@ struct NotchContentView: View {
 
     private var heatmapStrip: some View {
         let maxCount = max(heatmap.maxCount, 1)
-        let currentHour = Calendar.current.component(.hour, from: Date())
+        // Only show the "now" indicator when looking at today's
+        // heatmap. For past days, there's no "now" to point at.
+        let currentHour = heatmap.isViewingToday
+            ? Calendar.current.component(.hour, from: Date())
+            : -1
 
         return HStack(spacing: 2) {
             ForEach(0..<24, id: \.self) { hour in
                 let count = heatmap.hourlyCounts[hour]
                 let intensity = Double(count) / Double(maxCount)
                 let isHovered = hoveredHeatmapHour == hour
+                let isCurrentHour = hour == currentHour
                 RoundedRectangle(cornerRadius: 3, style: .continuous)
                     .fill(
-                        cellColor(intensity: intensity, isCurrent: hour == currentHour)
+                        cellColor(intensity: intensity, isCurrent: isCurrentHour)
                     )
                     .frame(height: 22)
                     .overlay(
@@ -927,7 +1225,7 @@ struct NotchContentView: View {
                             .strokeBorder(
                                 isHovered
                                     ? Color.white.opacity(0.85)
-                                    : (hour == currentHour ? accent : .clear),
+                                    : (isCurrentHour ? accent : .clear),
                                 lineWidth: isHovered ? 1.2 : 1
                             )
                     )
@@ -953,6 +1251,17 @@ struct NotchContentView: View {
             return hourTooltip(hour: hour, count: count)
         }
         return "\(heatmap.totalToday) events"
+    }
+
+    /// Label for the heatmap section header — "Today", "Yesterday",
+    /// or a short date like "Mon Apr 13" for older days.
+    private var heatmapDayLabel: String {
+        let cal = Calendar.current
+        if cal.isDateInToday(heatmap.viewingDate) { return "Today" }
+        if cal.isDateInYesterday(heatmap.viewingDate) { return "Yesterday" }
+        let f = DateFormatter()
+        f.dateFormat = "EEE MMM d"
+        return f.string(from: heatmap.viewingDate)
     }
 
     private func cellColor(intensity: Double, isCurrent: Bool) -> Color {
@@ -1585,7 +1894,7 @@ struct NotchContentView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 12) {
             appearanceMenu {
                 BuddyFace(mode: mode, size: 11)
                     .frame(width: 44, height: 24)
@@ -1600,12 +1909,381 @@ struct NotchContentView: View {
                     .foregroundColor(.white.opacity(0.5))
             }
 
-            Spacer()
+            Spacer(minLength: 4)
+
+            // Center: usage pill — summary of claude usage in the
+            // rolling 5-hour window. Hover shows a detail popover
+            // below with the full breakdown.
+            usagePill
+
+            Spacer(minLength: 4)
 
             statBadge
             customizeButton
             quitButton
         }
+    }
+
+    // MARK: - Usage pill (center of header)
+
+    @State private var usageDetailShown = false
+
+    /// Click-to-toggle the usage card. When live API data is
+    /// available we show the exact 5h utilization % (same number
+    /// Claude's account page shows). Falls back to a jsonl-derived
+    /// raw message count if the user isn't signed in or the fetch
+    /// failed.
+    private var usagePill: some View {
+        return Button {
+            usageDetailShown.toggle()
+            if usageDetailShown { usage.refreshIfNeeded() }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "hourglass")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(usageTint(percent: usage.live?.fiveHour?.utilization ?? 0))
+                usagePillContent
+            }
+            .padding(.horizontal, 11)
+            .padding(.vertical, 5)
+            .background(
+                ZStack(alignment: .leading) {
+                    Capsule(style: .continuous)
+                        .fill(Color.white.opacity(0.08))
+                    // Progress fill — only when we have live data.
+                    if let util = usage.live?.fiveHour?.utilization {
+                        GeometryReader { geo in
+                            Capsule(style: .continuous)
+                                .fill(usageTint(percent: util).opacity(0.28))
+                                .frame(width: geo.size.width * min(util / 100, 1.0))
+                        }
+                    }
+                }
+                .overlay(
+                    Capsule()
+                        .strokeBorder(
+                            usageDetailShown
+                                ? accentBorder.opacity(0.6)
+                                : Color.white.opacity(0.08),
+                            lineWidth: 0.5
+                        )
+                )
+            )
+        }
+        .buttonStyle(.plain)
+        .help("Click for usage details")
+        .onAppear { usage.refreshIfNeeded() }
+    }
+
+    @ViewBuilder
+    private var usagePillContent: some View {
+        if let live5h = usage.live?.fiveHour {
+            let pct = Int(live5h.utilization.rounded())
+            Text(verbatim: "\(pct)%")
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundColor(.white.opacity(0.92))
+                .monospacedDigit()
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+            Text(verbatim: "· 5h")
+                .font(.system(size: 9, weight: .medium, design: .rounded))
+                .foregroundColor(.white.opacity(0.45))
+        } else {
+            // Fallback: raw message count from jsonls when we can't
+            // reach the API (offline, not signed in, etc.).
+            Text(verbatim: "\(usage.last5h.messageCount)")
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundColor(.white.opacity(0.92))
+                .monospacedDigit()
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+            Text(verbatim: "· 5h")
+                .font(.system(size: 9, weight: .medium, design: .rounded))
+                .foregroundColor(.white.opacity(0.45))
+        }
+    }
+
+    /// Tint based on a 0-100 utilization percent. Accent under 70%,
+    /// amber 70-94, red 95+.
+    private func usageTint(percent: Double) -> Color {
+        if percent >= 95 { return Color(red: 0.97, green: 0.45, blue: 0.45) }
+        if percent >= 70 { return Color(red: 0.97, green: 0.78, blue: 0.40) }
+        return accent
+    }
+
+    /// Detail card — drops below the usage pill when clicked.
+    /// Shows the live utilization percentages pulled from Anthropic's
+    /// oauth/usage endpoint (same data as claude.ai/settings), with
+    /// jsonl-derived token breakdown as bonus context.
+    ///
+    /// Card has a fixed outer size; the scrollable body makes sure
+    /// long content (several weekly limit rows + token breakdown +
+    /// extra credits) never overflows the panel.
+    private var usageDetailPopover: some View {
+        VStack(spacing: 0) {
+            // Header with explicit close button — sticky above the
+            // scroll content so it's always reachable.
+            HStack {
+                Text("USAGE")
+                    .font(.system(size: 9, weight: .bold, design: .rounded))
+                    .tracking(0.7)
+                    .foregroundColor(.white.opacity(0.5))
+                Spacer()
+                Button { usageDetailShown = false } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.white.opacity(0.5))
+                        .frame(width: 20, height: 20)
+                        .background(Circle().fill(Color.white.opacity(0.08)))
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.cancelAction)
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 14)
+            .padding(.bottom, 10)
+
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 14) {
+                    if let live = usage.live {
+                        liveUsageSection(live)
+                    } else {
+                        noLiveDataSection
+                    }
+
+                    Rectangle()
+                        .fill(Color.white.opacity(0.08))
+                        .frame(height: 1)
+
+                    // Token breakdown for today (from local jsonls,
+                    // always available regardless of API state).
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("TODAY · TOKEN BREAKDOWN")
+                            .font(.system(size: 8, weight: .bold, design: .rounded))
+                            .tracking(0.6)
+                            .foregroundColor(.white.opacity(0.4))
+                        tokenRow(label: "Input", value: usage.today.inputTokens)
+                        tokenRow(label: "Output", value: usage.today.outputTokens)
+                        tokenRow(label: "Cache read", value: usage.today.cacheReadTokens, dim: true)
+                        tokenRow(label: "Cache write", value: usage.today.cacheCreationTokens, dim: true)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.bottom, 14)
+            }
+        }
+        .frame(width: 340)
+        .frame(maxHeight: expandedHeight - 140)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color(white: 0.08))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.1), lineWidth: 0.5)
+                )
+                .shadow(color: .black.opacity(0.55), radius: 18, y: 8)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .onTapGesture { /* swallow */ }
+    }
+
+    @ViewBuilder
+    private func liveUsageSection(_ live: ClaudeUsage) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let w = live.fiveHour {
+                liveUsageRow(label: "Current session", window: w)
+            }
+            if live.sevenDay != nil || live.sevenDaySonnet != nil || live.sevenDayOpus != nil {
+                Text("WEEKLY LIMITS")
+                    .font(.system(size: 8, weight: .bold, design: .rounded))
+                    .tracking(0.6)
+                    .foregroundColor(.white.opacity(0.4))
+                    .padding(.top, 2)
+                if let w = live.sevenDay {
+                    liveUsageRow(label: "All models", window: w)
+                }
+                if let w = live.sevenDaySonnet {
+                    liveUsageRow(label: "Sonnet only", window: w)
+                }
+                if let w = live.sevenDayOpus {
+                    liveUsageRow(label: "Opus only", window: w)
+                }
+            }
+            if let extra = live.extraUsage, extra.isEnabled {
+                Rectangle()
+                    .fill(Color.white.opacity(0.08))
+                    .frame(height: 1)
+                    .padding(.vertical, 2)
+                extraCreditRow(extra)
+            }
+        }
+    }
+
+    private func liveUsageRow(label: String, window: ClaudeUsage.Window) -> some View {
+        let pct = window.utilization
+        let ratio = min(pct / 100, 1.0)
+        let tint = usageTint(percent: pct)
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(label)
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundColor(.white.opacity(0.85))
+                Spacer()
+                Text(verbatim: "\(Int(pct.rounded()))%")
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundColor(tint)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+            }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .fill(Color.white.opacity(0.07))
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .fill(tint)
+                        .frame(width: max(4, geo.size.width * ratio))
+                }
+            }
+            .frame(height: 5)
+            if let reset = window.resetsAt, reset > Date() {
+                Text(verbatim: "resets in \(relativeDurationLabel(reset))")
+                    .font(.system(size: 9, design: .rounded))
+                    .foregroundColor(.white.opacity(0.4))
+                    .monospacedDigit()
+            }
+        }
+    }
+
+    private func extraCreditRow(_ extra: ClaudeUsage.ExtraUsage) -> some View {
+        let pct = extra.utilization
+        let ratio = min(pct / 100, 1.0)
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Extra credits")
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundColor(.white.opacity(0.85))
+                Spacer()
+                Text(verbatim: "\(Int(pct.rounded()))%")
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundColor(accent)
+                    .monospacedDigit()
+            }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .fill(Color.white.opacity(0.07))
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .fill(accent)
+                        .frame(width: max(4, geo.size.width * ratio))
+                }
+            }
+            .frame(height: 5)
+            Text(verbatim: "\(Int(extra.usedCredits.rounded())) / \(extra.monthlyLimit) credits")
+                .font(.system(size: 9, design: .rounded))
+                .foregroundColor(.white.opacity(0.4))
+                .monospacedDigit()
+        }
+    }
+
+    /// Shown when we can't pull live usage data (user isn't signed
+    /// into Claude Code, the token is expired, etc.). Falls back to
+    /// the jsonl-derived 5h message count and a link to claude.ai.
+    private var noLiveDataSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.5))
+                Text("Couldn't fetch live usage")
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundColor(.white.opacity(0.75))
+            }
+            Text("Sign in to Claude Code, or check your connection. Showing local activity below.")
+                .font(.system(size: 10, design: .rounded))
+                .foregroundColor(.white.opacity(0.45))
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(verbatim: "\(usage.last5h.messageCount)")
+                    .font(.system(size: 18, weight: .semibold, design: .rounded))
+                    .foregroundColor(.white)
+                    .monospacedDigit()
+                Text("messages · 5h")
+                    .font(.system(size: 10, design: .rounded))
+                    .foregroundColor(.white.opacity(0.5))
+                Spacer()
+            }
+            Button {
+                if let url = URL(string: "https://claude.ai/settings/billing") {
+                    NSWorkspace.shared.open(url)
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "safari")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text("Open claude.ai usage")
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                    Spacer()
+                    Image(systemName: "arrow.up.right")
+                        .font(.system(size: 9, weight: .bold))
+                }
+                .foregroundColor(accent)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(accentDim)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .strokeBorder(accentBorder, lineWidth: 0.5)
+                        )
+                )
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    /// "4h 28m", "2d 3h", etc. — compact duration between now and a
+    /// future date, used for the window reset countdown.
+    private func relativeDurationLabel(_ future: Date) -> String {
+        let seconds = Int(future.timeIntervalSince(Date()))
+        if seconds <= 0 { return "now" }
+        let h = seconds / 3600
+        let m = (seconds % 3600) / 60
+        let d = h / 24
+        if d > 0 {
+            let rh = h % 24
+            return "\(d)d \(rh)h"
+        }
+        if h > 0 { return "\(h)h \(m)m" }
+        return "\(m)m"
+    }
+
+    private func tokenRow(label: String, value: Int, dim: Bool = false) -> some View {
+        HStack {
+            Text(label)
+                .font(.system(size: 10, design: .rounded))
+                .foregroundColor(dim ? .white.opacity(0.35) : .white.opacity(0.7))
+            Spacer()
+            Text(verbatim: formatTokens(value))
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .foregroundColor(dim ? .white.opacity(0.45) : .white.opacity(0.9))
+                .monospacedDigit()
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+        }
+    }
+
+    /// Compact token count: 1234 → "1.2k", 12345 → "12k",
+    /// 1234567 → "1.2M". Keeps header values readable.
+    private func formatTokens(_ n: Int) -> String {
+        if n < 1000 { return "\(n)" }
+        if n < 1_000_000 {
+            let v = Double(n) / 1000
+            return String(format: n < 10_000 ? "%.1fk" : "%.0fk", v)
+        }
+        let v = Double(n) / 1_000_000
+        return String(format: "%.1fM", v)
     }
 
     /// Tiny sliders icon that opens the appearance picker. Separate from
@@ -1730,7 +2408,111 @@ struct NotchContentView: View {
                 .fill(Color.white.opacity(0.08))
                 .frame(height: 1)
 
+            speechSection
+
+            Rectangle()
+                .fill(Color.white.opacity(0.08))
+                .frame(height: 1)
+
             soundSection
+        }
+    }
+
+    private var speechSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(
+                    systemName: prefs.speechEnabled
+                        ? "bubble.left.fill"
+                        : "bubble.left"
+                )
+                .font(.system(size: 12))
+                .foregroundColor(prefs.speechEnabled ? accent : .white.opacity(0.4))
+
+                Text("SPEECH")
+                    .font(.system(size: 9, weight: .bold, design: .rounded))
+                    .tracking(0.7)
+                    .foregroundColor(.white.opacity(0.45))
+
+                Spacer()
+
+                Toggle("", isOn: $prefs.speechEnabled)
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .tint(accent)
+                    .labelsHidden()
+            }
+
+            VStack(spacing: 6) {
+                ForEach(SpeechEvent.allCases) { event in
+                    speechEventRow(event)
+                }
+            }
+            .opacity(prefs.speechEnabled ? 1 : 0.35)
+            .allowsHitTesting(prefs.speechEnabled)
+        }
+    }
+
+    private func speechEventRow(_ event: SpeechEvent) -> some View {
+        let enabled = prefs.speechEvents[event] ?? true
+        return HStack(spacing: 8) {
+            Image(systemName: event.icon)
+                .font(.system(size: 10))
+                .foregroundColor(
+                    enabled && prefs.speechEnabled
+                        ? accent
+                        : .white.opacity(0.35)
+                )
+                .frame(width: 14)
+
+            Text(event.label)
+                .font(.system(size: 11, design: .rounded))
+                .foregroundColor(.white.opacity(0.85))
+
+            Spacer()
+
+            // Preview button — fires a sample speech for this event
+            // so the user can see what it looks like without waiting
+            // for the real trigger.
+            Button {
+                previewSpeech(for: event)
+            } label: {
+                Image(systemName: "play.fill")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(.white.opacity(0.55))
+                    .frame(width: 18, height: 18)
+                    .background(Circle().fill(Color.white.opacity(0.08)))
+            }
+            .buttonStyle(.plain)
+            .help("Preview \(event.label)")
+
+            Toggle(
+                "",
+                isOn: Binding(
+                    get: { prefs.speechEvents[event] ?? true },
+                    set: { prefs.setSpeechEvent(event, $0) }
+                )
+            )
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .tint(accent)
+            .labelsHidden()
+        }
+    }
+
+    /// Fire a sample speech pop-out for the given event so the user
+    /// can see what it'll look like when the real thing triggers.
+    /// Bypasses the rate limiter + dedup.
+    private func previewSpeech(for event: SpeechEvent) {
+        switch event {
+        case .sessionFinished:
+            speechController.preview(
+                kind: .sessionFinished,
+                title: monitor.sessions.first?.projectName ?? "notch-pilot",
+                subtitle: "done",
+                icon: "checkmark.circle.fill",
+                tint: .accent
+            )
         }
     }
 
@@ -1757,6 +2539,14 @@ struct NotchContentView: View {
                 title: "Start at login",
                 subtitle: "Auto-launch Notch Pilot when you log in",
                 isOn: $prefs.startAtLogin
+            )
+
+            behaviorRow(
+                iconOn: "hand.tap.fill",
+                iconOff: "hand.tap",
+                title: "Haptic feedback",
+                subtitle: "A subtle trackpad tick when the panel opens or closes",
+                isOn: $prefs.hapticsEnabled
             )
         }
     }

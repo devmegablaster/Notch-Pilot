@@ -1,10 +1,14 @@
 import Foundation
 import Combine
 
-/// Aggregates today's Claude activity from every session jsonl in
-/// `~/.claude/projects/`, binned by hour. Designed to be cheap to query
-/// (cached for 60s) and safe to call from the main thread — the actual
-/// scan runs on a background task.
+/// Aggregates Claude activity for a specific day from every session
+/// jsonl in `~/.claude/projects/`, binned by hour. Designed to be cheap
+/// (cached for 60s per-day) and safe to call from the main thread —
+/// the actual scan runs on a background task.
+///
+/// The current day being displayed is controlled by `viewingDate`.
+/// `advanceDay(by:)` moves backward/forward. "today" is a fresh scan;
+/// past days are read from on-disk jsonls that still exist.
 @MainActor
 final class HeatmapAggregator: ObservableObject {
     @Published private(set) var hourlyCounts: [Int] = Array(repeating: 0, count: 24)
@@ -16,32 +20,66 @@ final class HeatmapAggregator: ObservableObject {
     @Published private(set) var totalToday: Int = 0
     @Published private(set) var lastRefreshed: Date? = nil
 
+    /// The day currently being displayed. Defaults to today. Users
+    /// can step backward/forward via the heatmap header arrows.
+    @Published private(set) var viewingDate: Date = Calendar.current.startOfDay(for: Date())
+
     private let refreshInterval: TimeInterval = 60
     private var refreshTask: Task<Void, Never>?
+    private var cachedDate: Date?
 
-    /// Kick off a refresh if the cached data is older than `refreshInterval`.
-    /// Safe to call repeatedly — coalesced internally.
+    /// Kick off a refresh if the currently-viewed day's data is older
+    /// than `refreshInterval`, or if the day changed since the last
+    /// refresh. Safe to call repeatedly — coalesced internally.
     func refreshIfNeeded() {
         if let last = lastRefreshed,
+           cachedDate == viewingDate,
            Date().timeIntervalSince(last) < refreshInterval {
             return
         }
         if refreshTask != nil { return }
 
+        let target = viewingDate
         refreshTask = Task { [weak self] in
             let result = await Task.detached(priority: .utility) {
-                Self.scanToday()
+                Self.scan(day: target)
             }.value
             await MainActor.run {
                 guard let self = self else { return }
+                // Discard if the user switched days while the scan was
+                // running; let the next refreshIfNeeded handle it.
+                guard self.viewingDate == target else {
+                    self.refreshTask = nil
+                    self.refreshIfNeeded()
+                    return
+                }
                 self.hourlyCounts = result.counts
                 self.hourlyProjects = result.projects
                 self.maxCount = result.counts.max() ?? 0
                 self.totalToday = result.counts.reduce(0, +)
                 self.lastRefreshed = Date()
+                self.cachedDate = target
                 self.refreshTask = nil
             }
         }
+    }
+
+    /// Shift `viewingDate` by `days` (negative = backward). Clamped
+    /// so the user can't go into the future.
+    func advanceDay(by days: Int) {
+        let cal = Calendar.current
+        guard let next = cal.date(byAdding: .day, value: days, to: viewingDate) else { return }
+        let today = cal.startOfDay(for: Date())
+        if next > today { return }
+        viewingDate = next
+        // Force a refresh immediately since the day changed.
+        cachedDate = nil
+        refreshIfNeeded()
+    }
+
+    /// True if the displayed day is the current calendar day.
+    var isViewingToday: Bool {
+        Calendar.current.isDateInToday(viewingDate)
     }
 
     /// Returns the projects active during a given hour, sorted by event
@@ -55,14 +93,17 @@ final class HeatmapAggregator: ObservableObject {
 
     // MARK: - Scan (runs off main)
 
-    private nonisolated static func scanToday() -> (
+    private nonisolated static func scan(day: Date) -> (
         counts: [Int],
         projects: [[String: Int]]
     ) {
         var counts = Array(repeating: 0, count: 24)
         var perHourProjects = Array(repeating: [String: Int](), count: 24)
         let calendar = Calendar.current
-        let startOfToday = calendar.startOfDay(for: Date())
+        let startOfDay = calendar.startOfDay(for: day)
+        guard let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay) else {
+            return (counts, perHourProjects)
+        }
 
         let home = FileManager.default.homeDirectoryForCurrentUser
         let projectsDir = home.appendingPathComponent(".claude/projects")
@@ -83,23 +124,30 @@ final class HeatmapAggregator: ObservableObject {
 
             guard let files = try? FileManager.default.contentsOfDirectory(
                 at: projectURL,
-                includingPropertiesForKeys: [.contentModificationDateKey]
+                includingPropertiesForKeys: [.contentModificationDateKey, .creationDateKey]
             ) else { continue }
 
             for fileURL in files where fileURL.pathExtension == "jsonl" {
-                // Skip files whose mtime is before today — no contributions
-                // possible, don't read them at all.
-                let mtime = (try? fileURL.resourceValues(
-                    forKeys: [.contentModificationDateKey]
-                ).contentModificationDate) ?? .distantPast
-                if mtime < startOfToday { continue }
+                // Skip files that couldn't possibly contain events for
+                // the target day — an mtime before the start-of-day
+                // means the file was last written before the day began,
+                // and a creation after the end-of-day means it didn't
+                // exist yet. Either way, zero contributions.
+                let resourceValues = try? fileURL.resourceValues(
+                    forKeys: [.contentModificationDateKey, .creationDateKey]
+                )
+                let mtime = resourceValues?.contentModificationDate ?? .distantPast
+                let ctime = resourceValues?.creationDate ?? .distantPast
+                if mtime < startOfDay { continue }
+                if ctime >= endOfDay { continue }
 
                 scan(
                     fileURL,
                     into: &counts,
                     perHourProjects: &perHourProjects,
                     calendar: calendar,
-                    startOfToday: startOfToday
+                    startOfDay: startOfDay,
+                    endOfDay: endOfDay
                 )
             }
         }
@@ -111,19 +159,18 @@ final class HeatmapAggregator: ObservableObject {
         into counts: inout [Int],
         perHourProjects: inout [[String: Int]],
         calendar: Calendar,
-        startOfToday: Date
+        startOfDay: Date,
+        endOfDay: Date
     ) {
-        // Read file contents. For large sessions we could chunk, but the
-        // 60s cache + mtime filter keeps this bounded.
         guard let contents = try? String(contentsOf: url, encoding: .utf8) else {
             return
         }
 
         let lines = contents.split(omittingEmptySubsequences: true, whereSeparator: \.isNewline)
 
-        // First pass: find a cwd field (any line that has one) so we can
-        // attribute every event in this jsonl to a project name. Falls
-        // back to the directory-encoded name if no cwd is present.
+        // First pass: attribute every event in this jsonl to a project
+        // name via the first cwd field we find. Falls back to the
+        // directory-encoded name if no cwd is present.
         var project: String?
         for rawLine in lines {
             let line = String(rawLine)
@@ -140,7 +187,7 @@ final class HeatmapAggregator: ObservableObject {
         }
         let projectName = project ?? "unknown"
 
-        // Second pass: count events.
+        // Second pass: count events for the target day window.
         for rawLine in lines {
             let line = String(rawLine)
             guard line.contains("\"timestamp\":") else { continue }
@@ -149,7 +196,11 @@ final class HeatmapAggregator: ObservableObject {
                   let tsString = obj["timestamp"] as? String
             else { continue }
 
-            guard let date = parseISO8601(tsString), date >= startOfToday else { continue }
+            guard let date = parseISO8601(tsString),
+                  date >= startOfDay,
+                  date < endOfDay
+            else { continue }
+
             let hour = calendar.component(.hour, from: date)
             if (0..<24).contains(hour) {
                 counts[hour] += 1

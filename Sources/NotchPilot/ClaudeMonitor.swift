@@ -26,6 +26,15 @@ struct ClaudeSession: Identifiable, Equatable {
     let nativeMode: String   // Claude Code's own permission mode (from jsonl)
     let toolAction: ToolAction
     let isActive: Bool
+    /// Approximate total prompt tokens used by the last turn — the
+    /// current "context window size" as Claude sees it. Parsed from
+    /// `message.usage.input_tokens + cache_read + cache_creation`.
+    let contextTokens: Int
+    /// Effective context window for this session: 200k by default,
+    /// 1M if the session has been observed using > 190k at any
+    /// point (meaning it's in Anthropic's 1M beta mode). Decided by
+    /// the monitor via sticky caching — once bumped to 1M, stays 1M.
+    let contextWindow: Int
 }
 
 @MainActor
@@ -42,7 +51,20 @@ final class ClaudeMonitor: ObservableObject {
 
     // mtime-keyed parse cache. When a jsonl's mtime hasn't changed since
     // the last poll we reuse the cached parse instead of re-reading.
-    private var parseCache: [String: (mtime: Date, message: String, status: String, cwd: String, model: String, nativeMode: String, toolAction: ToolAction)] = [:]
+    private var parseCache: [String: (mtime: Date, message: String, status: String, cwd: String, model: String, nativeMode: String, toolAction: ToolAction, contextTokens: Int)] = [:]
+
+    /// Sticky per-jsonl context token cache. Unlike parseCache it
+    /// never drops to 0 — once we see a usage block for a session we
+    /// remember the last value, so the context ring in the UI doesn't
+    /// flicker when the next parse happens to land on a user-turn or
+    /// tool-result entry (which have no usage block).
+    private var stickyContextTokens: [String: Int] = [:]
+
+    /// Sticky per-jsonl context window inference. Starts unknown;
+    /// once a session is observed using > 190k tokens we're confident
+    /// it's in Anthropic's 1M beta mode and pin the window to 1M
+    /// forever. Otherwise defaults to 200k. Avoids per-tick flip-flop.
+    private var stickyContextWindow: [String: Int] = [:]
 
     func start() {
         refresh()
@@ -100,10 +122,11 @@ final class ClaudeMonitor: ObservableObject {
             let sessionID: String
             let projectName: String
             let projectPath: String
+            let jsonlPath: String    // used to look up sticky caches
             let cwd: String          // normalized, used as the group key
             let startTime: Date
             let lastActivity: Date
-            let parsed: (message: String, status: String, cwd: String, model: String, nativeMode: String, toolAction: ToolAction)
+            let parsed: (message: String, status: String, cwd: String, model: String, nativeMode: String, toolAction: ToolAction, contextTokens: Int)
         }
         var candidates: [Candidate] = []
 
@@ -142,6 +165,18 @@ final class ClaudeMonitor: ObservableObject {
                 // so skip it. It will appear on a subsequent tick.
                 guard !parsed.cwd.isEmpty else { continue }
 
+                // Sticky context token + window update: remember the
+                // last observed token count and lock the window to 1M
+                // if we've ever seen > 190k on this session.
+                if parsed.contextTokens > 0 {
+                    stickyContextTokens[jsonlURL.path] = parsed.contextTokens
+                    if parsed.contextTokens > 190_000 {
+                        stickyContextWindow[jsonlURL.path] = 1_000_000
+                    } else if stickyContextWindow[jsonlURL.path] == nil {
+                        stickyContextWindow[jsonlURL.path] = 200_000
+                    }
+                }
+
                 let projectName = (parsed.cwd as NSString).lastPathComponent
                 let startTime: Date = {
                     if let attrs = try? fm.attributesOfItem(atPath: jsonlURL.path),
@@ -156,6 +191,7 @@ final class ClaudeMonitor: ObservableObject {
                     sessionID: sessionID,
                     projectName: projectName,
                     projectPath: projectURL.path,
+                    jsonlPath: jsonlURL.path,
                     cwd: ProcessLookup.normalize(parsed.cwd),
                     startTime: startTime,
                     lastActivity: lastActivity,
@@ -179,6 +215,13 @@ final class ClaudeMonitor: ObservableObject {
             let sorted = group.sorted { $0.lastActivity > $1.lastActivity }
             for c in sorted.prefix(capacity) {
                 let isActive = now.timeIntervalSince(c.lastActivity) < activeThreshold
+                // Use sticky cached values so the UI's context ring
+                // never flickers when a tail parse happens to land on
+                // a non-usage entry.
+                let stickyTokens = stickyContextTokens[c.jsonlPath]
+                    ?? (c.parsed.contextTokens > 0 ? c.parsed.contextTokens : 0)
+                let stickyWindow = stickyContextWindow[c.jsonlPath] ?? 200_000
+
                 result.append(ClaudeSession(
                     id: c.sessionID,
                     projectName: c.projectName,
@@ -191,13 +234,17 @@ final class ClaudeMonitor: ObservableObject {
                     model: c.parsed.model,
                     nativeMode: c.parsed.nativeMode,
                     toolAction: c.parsed.toolAction,
-                    isActive: isActive
+                    isActive: isActive,
+                    contextTokens: stickyTokens,
+                    contextWindow: stickyWindow
                 ))
             }
         }
 
         // Evict stale cache entries for files that no longer exist.
         parseCache = parseCache.filter { livePaths.contains($0.key) }
+        stickyContextTokens = stickyContextTokens.filter { livePaths.contains($0.key) }
+        stickyContextWindow = stickyContextWindow.filter { livePaths.contains($0.key) }
 
         return result.sorted { $0.lastActivity > $1.lastActivity }
     }
@@ -214,18 +261,18 @@ final class ClaudeMonitor: ObservableObject {
 
     // MARK: - Parsing (with mtime cache)
 
-    private func parseLastEntryCached(_ url: URL, mtime: Date) -> (message: String, status: String, cwd: String, model: String, nativeMode: String, toolAction: ToolAction) {
+    private func parseLastEntryCached(_ url: URL, mtime: Date) -> (message: String, status: String, cwd: String, model: String, nativeMode: String, toolAction: ToolAction, contextTokens: Int) {
         if let cached = parseCache[url.path], cached.mtime == mtime {
-            return (cached.message, cached.status, cached.cwd, cached.model, cached.nativeMode, cached.toolAction)
+            return (cached.message, cached.status, cached.cwd, cached.model, cached.nativeMode, cached.toolAction, cached.contextTokens)
         }
         let parsed = parseLastEntry(url)
-        parseCache[url.path] = (mtime, parsed.message, parsed.status, parsed.cwd, parsed.model, parsed.nativeMode, parsed.toolAction)
+        parseCache[url.path] = (mtime, parsed.message, parsed.status, parsed.cwd, parsed.model, parsed.nativeMode, parsed.toolAction, parsed.contextTokens)
         return parsed
     }
 
-    private func parseLastEntry(_ url: URL) -> (message: String, status: String, cwd: String, model: String, nativeMode: String, toolAction: ToolAction) {
+    private func parseLastEntry(_ url: URL) -> (message: String, status: String, cwd: String, model: String, nativeMode: String, toolAction: ToolAction, contextTokens: Int) {
         let tail = readTail(url, bytes: 64 * 1024)
-        guard !tail.isEmpty else { return ("", "", "", "", "", .none) }
+        guard !tail.isEmpty else { return ("", "", "", "", "", .none, 0) }
 
         let lines = tail.split(omittingEmptySubsequences: true, whereSeparator: \.isNewline)
 
@@ -234,6 +281,7 @@ final class ClaudeMonitor: ObservableObject {
         var foundNativeMode: String?
         var foundResult: (message: String, status: String)?
         var foundAction: ToolAction = .none
+        var foundContextTokens: Int = 0
 
         for line in lines.reversed().prefix(50) {
             guard let data = line.data(using: .utf8),
@@ -265,6 +313,17 @@ final class ClaudeMonitor: ObservableObject {
             let type = obj["type"] as? String ?? ""
 
             if type == "assistant" {
+                if let msg = obj["message"] as? [String: Any],
+                   let usage = msg["usage"] as? [String: Any],
+                   foundContextTokens == 0
+                {
+                    // Capture total prompt tokens from the most recent
+                    // assistant turn — that's the current context size.
+                    let input = (usage["input_tokens"] as? Int) ?? 0
+                    let cacheRead = (usage["cache_read_input_tokens"] as? Int) ?? 0
+                    let cacheCreate = (usage["cache_creation_input_tokens"] as? Int) ?? 0
+                    foundContextTokens = input + cacheRead + cacheCreate
+                }
                 if let msg = obj["message"] as? [String: Any],
                    let content = msg["content"] as? [[String: Any]] {
                     if let toolBlock = content.reversed().first(where: {
@@ -323,7 +382,8 @@ final class ClaudeMonitor: ObservableObject {
             foundCwd ?? "",
             foundModel ?? "",
             foundNativeMode ?? "",
-            foundAction
+            foundAction,
+            foundContextTokens
         )
     }
 
