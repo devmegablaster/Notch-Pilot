@@ -1500,35 +1500,60 @@ struct NotchContentView: View {
     /// Behaviour toggles — things that change how the panel behaves,
     /// separate from appearance or sound.
     private var behaviorSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             Text("BEHAVIOR")
                 .font(.system(size: 9, weight: .bold, design: .rounded))
                 .tracking(0.7)
                 .foregroundColor(.white.opacity(0.45))
 
-            HStack(spacing: 10) {
-                Image(systemName: prefs.alwaysVisible ? "pin.fill" : "pin.slash")
-                    .font(.system(size: 12))
-                    .foregroundColor(prefs.alwaysVisible ? accent : .white.opacity(0.4))
-                    .frame(width: 16)
+            behaviorRow(
+                iconOn: "pin.fill",
+                iconOff: "pin.slash",
+                title: "Always visible",
+                subtitle: "Keep the buddy pinned even when Claude is idle",
+                isOn: $prefs.alwaysVisible
+            )
 
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Always visible")
-                        .font(.system(size: 12, weight: .medium, design: .rounded))
-                        .foregroundColor(.white.opacity(0.9))
-                    Text("Keep the buddy pinned even when Claude is idle")
-                        .font(.system(size: 10, design: .rounded))
-                        .foregroundColor(.white.opacity(0.45))
-                }
+            behaviorRow(
+                iconOn: "power",
+                iconOff: "power",
+                title: "Start at login",
+                subtitle: "Auto-launch Notch Pilot when you log in",
+                isOn: $prefs.startAtLogin
+            )
+        }
+    }
 
-                Spacer()
+    @ViewBuilder
+    private func behaviorRow(
+        iconOn: String,
+        iconOff: String,
+        title: String,
+        subtitle: String,
+        isOn: Binding<Bool>
+    ) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: isOn.wrappedValue ? iconOn : iconOff)
+                .font(.system(size: 12))
+                .foregroundColor(isOn.wrappedValue ? accent : .white.opacity(0.4))
+                .frame(width: 16)
 
-                Toggle("", isOn: $prefs.alwaysVisible)
-                    .toggleStyle(.switch)
-                    .controlSize(.mini)
-                    .tint(accent)
-                    .labelsHidden()
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundColor(.white.opacity(0.9))
+                Text(subtitle)
+                    .font(.system(size: 10, design: .rounded))
+                    .foregroundColor(.white.opacity(0.45))
             }
+
+            Spacer()
+
+            Toggle("", isOn: isOn)
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .tint(accent)
+                .labelsHidden()
         }
     }
 
