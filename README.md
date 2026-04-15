@@ -16,20 +16,27 @@ When Claude is working, a little buddy peeks out of the notch and reacts to what
 
 ## Install
 
+### Homebrew (recommended)
+
+```sh
+brew install --cask devmegablaster/devmegablaster/notch-pilot
+```
+
+First launch: right-click `Notch Pilot.app` in `/Applications` → **Open** (the app is ad-hoc signed, not Developer-ID signed, so Gatekeeper needs a one-time override).
+
 ### DMG
 
-1. Grab the latest `.dmg` from [Releases](https://github.com/YOUR_USERNAME/notch-pilot/releases).
+1. Grab the latest `.dmg` from [Releases](https://github.com/devmegablaster/Notch-Pilot/releases).
 2. Drag `Notch Pilot.app` to `/Applications`.
-3. First launch: right-click → **Open** (the app isn't signed with a paid Apple ID).
-4. Hover the notch to summon it.
+3. First launch: right-click → **Open**.
 
 ### From source
 
 Requires macOS 14+ and Swift 5.9+.
 
 ```sh
-git clone https://github.com/YOUR_USERNAME/notch-pilot.git
-cd notch-pilot
+git clone https://github.com/devmegablaster/Notch-Pilot.git
+cd Notch-Pilot
 ./scripts/build.sh            # dist/Notch Pilot.app
 ./scripts/make-dmg.sh         # dist/NotchPilot-<version>.dmg
 ```
