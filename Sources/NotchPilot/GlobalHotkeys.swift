@@ -32,16 +32,10 @@ final class GlobalHotkeys: ObservableObject {
         if AXIsProcessTrusted() {
             accessibilityMissing = false
         } else {
+            // Don't show the macOS system prompt — it's annoying on
+            // every update since ad-hoc signing changes the identity.
+            // The in-app banner with "Open" button handles this.
             accessibilityMissing = true
-            // Only show the system prompt once — not on every launch.
-            // The in-app banner with the "Open" button handles repeat cases.
-            let prompted = UserDefaults.standard.bool(forKey: "notchpilot.accessibilityPrompted")
-            if !prompted {
-                UserDefaults.standard.set(true, forKey: "notchpilot.accessibilityPrompted")
-                AXIsProcessTrustedWithOptions(
-                    [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
-                )
-            }
             pollForAccessibility()
         }
 
