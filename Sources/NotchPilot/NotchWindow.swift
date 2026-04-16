@@ -115,26 +115,28 @@ final class NotchWindow: NSPanel {
 
     // MARK: - Frame helpers
 
+    /// Both collapsed and expanded frames share the same x and width
+    /// so there's never a horizontal shift when transitioning. The
+    /// collapsed pill renders inside the wider window with transparent
+    /// background — clicks outside the pill pass through.
     private func collapsedFrame(size: CGSize) -> NSRect {
         guard let screen = NSScreen.main else { return .zero }
         let screenFrame = screen.frame
-        // Horizontally center the physical notch, not the window. The
-        // left section of the pill is `leftSectionWidth` (56) wide and
-        // sits to the left of the notch, so we shift the window origin
-        // left by (leftSectionWidth + notchWidth/2) from screen center.
-        // Speech pop-outs keep the same horizontal footprint — only
-        // the height changes — so the offset is identical.
-        let leftSection: CGFloat = 56
-        let x = screenFrame.midX - leftSection - notchWidth / 2
+        let w: CGFloat = 560
         let y = screenFrame.maxY - size.height
-        return NSRect(x: x, y: y, width: size.width, height: size.height)
+        return NSRect(
+            x: screenFrame.midX - w / 2,
+            y: y,
+            width: w,
+            height: size.height
+        )
     }
 
     private func expandedFrame() -> NSRect {
         guard let screen = NSScreen.main else { return .zero }
         let screenFrame = screen.frame
         let w: CGFloat = 560
-        let h: CGFloat = 460 // panel + shadow headroom
+        let h: CGFloat = 460
         return NSRect(
             x: screenFrame.midX - w / 2,
             y: screenFrame.maxY - h,
@@ -167,7 +169,7 @@ final class NotchWindow: NSPanel {
         // expanded-frame callback owns the frame while expanded.
         let currentFrame = self.frame
         let expected = expandedFrame()
-        if currentFrame.size != expected.size && currentFrame.origin.x != expected.origin.x {
+        if currentFrame.size != expected.size {
             // Animate so the speech pop-out physically grows rather
             // than hard-resizing to its new frame.
             let target = collapsedFrame(size: size)
@@ -181,16 +183,10 @@ final class NotchWindow: NSPanel {
 
     private func updateExpanded(_ expanded: Bool) {
         let target = expanded ? expandedFrame() : collapsedFrame(size: lastCollapsedSize)
-        if expanded {
-            // Snap to centered position immediately so the permission
-            // panel doesn't render off-center during the animation.
-            self.setFrame(target, display: true)
-        } else {
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.22
-                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                self.animator().setFrame(target, display: true)
-            }
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.22
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            self.animator().setFrame(target, display: true)
         }
     }
 }

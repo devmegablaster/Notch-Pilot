@@ -262,7 +262,6 @@ struct NotchContentView: View {
             if shouldShow {
                 if hasPendingPermission, let permission = hookBridge.pendingPermission {
                     permissionPanel(permission)
-                        .onAppear { onExpandedChange(true) }
                         .transition(
                             .scale(scale: 0.04, anchor: expandedNotchAnchor)
                             .combined(with: .opacity)
@@ -351,11 +350,6 @@ struct NotchContentView: View {
         }
         .onChange(of: collapsedSize) { _, newSize in
             onCollapsedSizeChange(newSize)
-            // Re-snap to expanded frame if we're currently expanded,
-            // so a collapsed-size change doesn't pull us off-center.
-            if effectivelyExpanded {
-                onExpandedChange(true)
-            }
         }
         .onChange(of: hookBridge.pendingPermission?.id) { oldID, newID in
             if oldID != nil && newID == nil {
