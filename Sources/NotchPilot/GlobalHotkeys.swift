@@ -29,15 +29,19 @@ final class GlobalHotkeys: ObservableObject {
     private var localMonitor: Any?
 
     func start() {
-        // Check without prompting first — if already granted, skip.
         if AXIsProcessTrusted() {
             accessibilityMissing = false
         } else {
-            // Not trusted — prompt once via the system dialog.
-            AXIsProcessTrustedWithOptions(
-                [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
-            )
             accessibilityMissing = true
+            // Only show the system prompt once — not on every launch.
+            // The in-app banner with the "Open" button handles repeat cases.
+            let prompted = UserDefaults.standard.bool(forKey: "notchpilot.accessibilityPrompted")
+            if !prompted {
+                UserDefaults.standard.set(true, forKey: "notchpilot.accessibilityPrompted")
+                AXIsProcessTrustedWithOptions(
+                    [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
+                )
+            }
             pollForAccessibility()
         }
 
