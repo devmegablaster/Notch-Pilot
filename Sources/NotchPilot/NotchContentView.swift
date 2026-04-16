@@ -123,7 +123,8 @@ struct NotchContentView: View {
         if isSpeaking {
             return CGSize(width: collapsedWidth, height: speechPillHeight)
         }
-        return CGSize(width: collapsedWidth, height: notchHeight)
+        let h = showPermissionAlert ? notchHeight + 10 : notchHeight
+        return CGSize(width: collapsedWidth, height: h)
     }
 
     @State private var permissionSuppressed = false
@@ -140,8 +141,21 @@ struct NotchContentView: View {
         expanded || hasPendingPermission
     }
 
+    /// True when any permission exists, regardless of suppression.
+    private var anyPermissionPending: Bool {
+        hookBridge.pendingPermission != nil
+    }
+
+    /// True when the collapsed pill should show alert visuals (color
+    /// change, border, pulsing text). Only when permission is pending
+    /// AND the permission panel isn't showing (i.e. it's suppressed
+    /// or not yet expanded).
+    private var showPermissionAlert: Bool {
+        anyPermissionPending && !effectivelyExpanded
+    }
+
     private var mode: BuddyFace.Mode {
-        if hasPendingPermission { return .curious }
+        if anyPermissionPending { return .curious }
 
         // Reactive: pick a mode based on what Claude is currently doing.
         if let working = workingSession {
@@ -165,6 +179,19 @@ struct NotchContentView: View {
         return .sleeping
     }
 
+    /// A buddy color that contrasts with the user's theme — used for
+    /// the "permission pending" alert state so it's always noticeable.
+    private var permissionAlertColor: BuddyColor {
+        switch prefs.color {
+        case .orange: return .cyan
+        case .blue:   return .orange
+        case .green:  return .orange
+        case .purple: return .orange
+        case .pink:   return .cyan
+        case .cyan:   return .orange
+        }
+    }
+
     /// Accent color sourced from the user's picked buddy color. Every
     /// orange-ish UI element in the panel (buttons, badges, active dots,
     /// etc.) reads from `accent` so the whole app themes to the buddy.
@@ -173,6 +200,9 @@ struct NotchContentView: View {
     private var accentBorder: Color { prefs.color.base.opacity(0.5) }
 
     private var currentStatus: String {
+        if showPermissionAlert {
+            return "permission"
+        }
         if activeCount > 0 {
             return activeCount == 1 ? "1 session" : "\(activeCount) sessions"
         }
@@ -232,6 +262,7 @@ struct NotchContentView: View {
             if shouldShow {
                 if hasPendingPermission, let permission = hookBridge.pendingPermission {
                     permissionPanel(permission)
+                        .onAppear { onExpandedChange(true) }
                         .transition(
                             .scale(scale: 0.04, anchor: expandedNotchAnchor)
                             .combined(with: .opacity)
@@ -320,6 +351,11 @@ struct NotchContentView: View {
         }
         .onChange(of: collapsedSize) { _, newSize in
             onCollapsedSizeChange(newSize)
+            // Re-snap to expanded frame if we're currently expanded,
+            // so a collapsed-size change doesn't pull us off-center.
+            if effectivelyExpanded {
+                onExpandedChange(true)
+            }
         }
         .onChange(of: hookBridge.pendingPermission?.id) { oldID, newID in
             if oldID != nil && newID == nil {
@@ -568,8 +604,13 @@ struct NotchContentView: View {
             // Left section: eyes anchored to the right edge (next to notch)
             HStack(spacing: 0) {
                 Spacer(minLength: 0)
-                BuddyFace(mode: mode, size: 9)
-                    .padding(.trailing, 16)
+                BuddyFace(
+                    mode: mode,
+                    size: 9,
+                    colorOverride: showPermissionAlert ? permissionAlertColor : nil
+                )
+                .animation(.easeInOut(duration: 0.5), value: showPermissionAlert)
+                .padding(.trailing, 16)
             }
             .frame(width: leftSectionWidth, height: notchHeight)
 
@@ -582,22 +623,45 @@ struct NotchContentView: View {
             // so it doesn't scream for attention; bright white while
             // there's actual activity.
             HStack(spacing: 0) {
-                Text(currentStatus)
-                    .font(.system(size: 11, weight: .medium, design: .rounded))
-                    .foregroundColor(
-                        isIdleStatus
-                            ? .white.opacity(0.35)
-                            : .white.opacity(0.92)
-                    )
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+                if showPermissionAlert {
+                    // Pulsing "permission" text
+                    TimelineView(.periodic(from: .now, by: 0.05)) { timeline in
+                        let t = timeline.date.timeIntervalSinceReferenceDate
+                        let opacity = 0.65 + 0.35 * sin(t * 2.5) // 0.3–1.0
+                        Text(currentStatus)
+                            .font(.system(size: 11, weight: .semibold, design: .rounded))
+                            .foregroundColor(permissionAlertColor.base.opacity(opacity))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
                     .padding(.leading, rightPillHorizontalPadding)
+                } else {
+                    Text(currentStatus)
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundColor(
+                            isIdleStatus
+                                ? .white.opacity(0.35)
+                                : .white.opacity(0.92)
+                        )
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .padding(.leading, rightPillHorizontalPadding)
+                }
                 Spacer(minLength: 0)
             }
             .frame(width: rightSectionWidth, height: notchHeight)
         }
         .frame(width: collapsedWidth, height: notchHeight, alignment: .topLeading)
-        .background(shape.fill(Color.black))
+        .background(
+            ZStack {
+                shape.fill(Color.black)
+                if showPermissionAlert {
+                    shape.inset(by: -1.5)
+                        .stroke(permissionAlertColor.base.opacity(0.7), lineWidth: 2)
+                }
+            }
+            .animation(.easeInOut(duration: 0.5), value: showPermissionAlert)
+        )
         .contentShape(shape)
         .onHover { hovering in
             if hovering {

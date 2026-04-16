@@ -167,7 +167,7 @@ final class NotchWindow: NSPanel {
         // expanded-frame callback owns the frame while expanded.
         let currentFrame = self.frame
         let expected = expandedFrame()
-        if currentFrame.size != expected.size {
+        if currentFrame.size != expected.size && currentFrame.origin.x != expected.origin.x {
             // Animate so the speech pop-out physically grows rather
             // than hard-resizing to its new frame.
             let target = collapsedFrame(size: size)
@@ -181,10 +181,16 @@ final class NotchWindow: NSPanel {
 
     private func updateExpanded(_ expanded: Bool) {
         let target = expanded ? expandedFrame() : collapsedFrame(size: lastCollapsedSize)
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.22
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            self.animator().setFrame(target, display: true)
+        if expanded {
+            // Snap to centered position immediately so the permission
+            // panel doesn't render off-center during the animation.
+            self.setFrame(target, display: true)
+        } else {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.22
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                self.animator().setFrame(target, display: true)
+            }
         }
     }
 }

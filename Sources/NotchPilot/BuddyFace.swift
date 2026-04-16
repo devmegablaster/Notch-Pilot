@@ -74,18 +74,21 @@ struct BuddyFace: View {
 
     let mode: Mode
     var size: CGFloat = 8
+    var colorOverride: BuddyColor? = nil
 
     @EnvironmentObject private var prefs: BuddyPreferences
+
+    private var effectiveColor: BuddyColor { colorOverride ?? prefs.color }
 
     var body: some View {
         Group {
             switch prefs.style {
-            case .eyes:  EyesBuddy(mode: mode, size: size, color: prefs.color)
-            case .orb:   OrbBuddy(mode: mode, size: size, color: prefs.color)
-            case .bars:  BarsBuddy(mode: mode, size: size, color: prefs.color)
-            case .ghost: GhostBuddy(mode: mode, size: size, color: prefs.color)
-            case .cat:   CatBuddy(mode: mode, size: size, color: prefs.color)
-            case .bunny: BunnyBuddy(mode: mode, size: size, color: prefs.color)
+            case .eyes:  EyesBuddy(mode: mode, size: size, color: effectiveColor)
+            case .orb:   OrbBuddy(mode: mode, size: size, color: effectiveColor)
+            case .bars:  BarsBuddy(mode: mode, size: size, color: effectiveColor)
+            case .ghost: GhostBuddy(mode: mode, size: size, color: effectiveColor)
+            case .cat:   CatBuddy(mode: mode, size: size, color: effectiveColor)
+            case .bunny: BunnyBuddy(mode: mode, size: size, color: effectiveColor)
             }
         }
         .id(prefs.style)
@@ -127,7 +130,7 @@ private func runBlinkLoop(
     while !Task.isCancelled {
         let (mean, jitter): (UInt64, UInt64) = {
             switch mode {
-            case .curious:  return (2_500_000_000, 1_200_000_000)
+            case .curious:  return (1_200_000_000, 600_000_000)
             case .active:   return (3_800_000_000, 1_400_000_000)
             case .focused:  return (4_800_000_000, 1_200_000_000)   // calm concentration
             case .content:  return (5_200_000_000, 1_800_000_000)
@@ -281,7 +284,7 @@ private struct EyesBuddy: View {
             while !Task.isCancelled {
                 let waitNs: UInt64 = {
                     switch mode {
-                    case .curious: return UInt64.random(in: 500_000_000 ... 1_400_000_000)
+                    case .curious: return UInt64.random(in: 300_000_000 ... 800_000_000)
                     case .active:  return UInt64.random(in: 2_500_000_000 ... 5_500_000_000)
                     case .content: return UInt64.random(in: 5_000_000_000 ... 9_000_000_000)
                     default:       return UInt64.random(in: 3_500_000_000 ... 7_000_000_000)
