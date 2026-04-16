@@ -125,8 +125,10 @@ struct NotchContentView: View {
         return CGSize(width: collapsedWidth, height: notchHeight)
     }
 
+    @State private var permissionSuppressed = false
+
     private var hasPendingPermission: Bool {
-        hookBridge.pendingPermission != nil
+        hookBridge.pendingPermission != nil && !permissionSuppressed
     }
 
     private var effectivelyExpanded: Bool {
@@ -317,8 +319,17 @@ struct NotchContentView: View {
         .onChange(of: hookBridge.pendingPermission?.id) { oldID, newID in
             if oldID != nil && newID == nil {
                 expanded = false
+                permissionSuppressed = false
             }
             if let p = hookBridge.pendingPermission, newID != oldID {
+                // Check if we should suppress this permission because
+                // the terminal is already focused
+                if prefs.suppressPermissionWhenFocused,
+                   TerminalJumper.isTerminalFocused(forCwd: p.cwd, claudePID: hookBridge.sessionPIDs[p.sessionID]) {
+                    permissionSuppressed = true
+                } else {
+                    permissionSuppressed = false
+                }
                 VoiceAnnouncer.shared.speak(
                     "Claude needs permission for \(p.toolName) in \(p.projectName)",
                     event: .permission,
@@ -858,7 +869,9 @@ struct NotchContentView: View {
             Spacer(minLength: 4)
 
             Button {
-                if !s.cwd.isEmpty { TerminalJumper.jump(toCwd: s.cwd) }
+                if !s.cwd.isEmpty {
+                    TerminalJumper.jump(toCwd: s.cwd, claudePID: hookBridge.sessionPIDs[s.id])
+                }
             } label: {
                 Image(systemName: "arrow.up.right.square")
                     .font(.system(size: 13, weight: .semibold))
@@ -2674,6 +2687,14 @@ struct NotchContentView: View {
                 subtitle: "A subtle trackpad tick when the panel opens or closes",
                 isOn: $prefs.hapticsEnabled
             )
+
+            behaviorRow(
+                iconOn: "eye.slash.fill",
+                iconOff: "eye.fill",
+                title: "Hide permissions when focused",
+                subtitle: "Don't pop the notch if the terminal is already in focus",
+                isOn: $prefs.suppressPermissionWhenFocused
+            )
         }
     }
 
@@ -3015,7 +3036,7 @@ struct NotchContentView: View {
 
             Button {
                 if !s.cwd.isEmpty {
-                    TerminalJumper.jump(toCwd: s.cwd)
+                    TerminalJumper.jump(toCwd: s.cwd, claudePID: hookBridge.sessionPIDs[s.id])
                 }
             } label: {
                 Image(systemName: "arrow.up.right.square")

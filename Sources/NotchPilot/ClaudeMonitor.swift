@@ -35,6 +35,9 @@ struct ClaudeSession: Identifiable, Equatable {
     /// point (meaning it's in Anthropic's 1M beta mode). Decided by
     /// the monitor via sticky caching — once bumped to 1M, stays 1M.
     let contextWindow: Int
+    /// PID of the matched claude process — used by TerminalJumper to
+    /// jump to the exact tmux pane when multiple sessions share a cwd.
+    let claudePID: Int32?
 }
 
 @MainActor
@@ -65,6 +68,10 @@ final class ClaudeMonitor: ObservableObject {
     /// it's in Anthropic's 1M beta mode and pin the window to 1M
     /// forever. Otherwise defaults to 200k. Avoids per-tick flip-flop.
     private var stickyContextWindow: [String: Int] = [:]
+
+    /// PIDs of live claude processes per normalized cwd, refreshed each scan.
+    /// Used to assign a specific PID to each session for tmux navigation.
+    private var lastLiveClaudePIDs: [String: [Int32]] = [:]
 
     func start() {
         refresh()
@@ -213,7 +220,8 @@ final class ClaudeMonitor: ObservableObject {
             let capacity = liveCwdCounts[cwd] ?? 0
             guard capacity > 0 else { continue }
             let sorted = group.sorted { $0.lastActivity > $1.lastActivity }
-            for c in sorted.prefix(capacity) {
+            let pids = lastLiveClaudePIDs[cwd] ?? []
+            for (idx, c) in sorted.prefix(capacity).enumerated() {
                 let isActive = now.timeIntervalSince(c.lastActivity) < activeThreshold
                 // Use sticky cached values so the UI's context ring
                 // never flickers when a tail parse happens to land on
@@ -236,7 +244,8 @@ final class ClaudeMonitor: ObservableObject {
                     toolAction: c.parsed.toolAction,
                     isActive: isActive,
                     contextTokens: stickyTokens,
-                    contextWindow: stickyWindow
+                    contextWindow: stickyWindow,
+                    claudePID: idx < pids.count ? pids[idx] : nil
                 ))
             }
         }
@@ -517,12 +526,9 @@ final class ClaudeMonitor: ObservableObject {
     /// cwd fd IS held open for the life of the process, which is what we
     /// read via `proc_pidinfo`.
     private func liveClaudeCwdCounts() -> [String: Int] {
+        lastLiveClaudePIDs.removeAll()
         var counts: [String: Int] = [:]
         for pid in ProcessLookup.allPIDs() where pid > 0 {
-            // Match on comm name OR exe path — `proc_name` usually reports
-            // "claude", but the binary lives under `.local/share/claude/
-            // versions/<ver>/...` and some codepaths report the version
-            // folder instead. Check both so we don't miss either form.
             let name = ProcessLookup.name(of: pid) ?? ""
             let nameMatches = name.lowercased() == "claude"
             var pathMatches = false
@@ -536,7 +542,9 @@ final class ClaudeMonitor: ObservableObject {
             guard nameMatches || pathMatches else { continue }
 
             guard let cwd = ProcessLookup.cwd(of: pid), !cwd.isEmpty else { continue }
-            counts[ProcessLookup.normalize(cwd), default: 0] += 1
+            let normalized = ProcessLookup.normalize(cwd)
+            counts[normalized, default: 0] += 1
+            lastLiveClaudePIDs[normalized, default: []].append(pid)
         }
         if ProcessInfo.processInfo.environment["NOTCH_PILOT_DEBUG"] != nil {
             print("[NotchPilot] liveClaudeCwdCounts: \(counts)")

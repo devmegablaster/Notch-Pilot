@@ -98,6 +98,15 @@ final class BuddyPreferences: ObservableObject {
         }
     }
 
+    /// When true, permission prompts are suppressed in the notch if the
+    /// terminal running the session is the frontmost app. The user can
+    /// answer directly in the terminal. Defaults false (always show).
+    @Published var suppressPermissionWhenFocused: Bool {
+        didSet {
+            UserDefaults.standard.set(suppressPermissionWhenFocused, forKey: Self.suppressPermKey)
+        }
+    }
+
     /// Master toggle for speech — when off, no event can trigger a
     /// buddy pop-out regardless of per-event flags. Defaults on.
     @Published var speechEnabled: Bool {
@@ -188,6 +197,7 @@ final class BuddyPreferences: ObservableObject {
     private static let hapticsKey = "notchpilot.haptics"
     private static let speechKey = "notchpilot.speech"
     private static let speechEventsKey = "notchpilot.speech.events"
+    private static let suppressPermKey = "notchpilot.suppressPermissionWhenFocused"
 
     init() {
         let defaults = UserDefaults.standard
@@ -201,6 +211,7 @@ final class BuddyPreferences: ObservableObject {
         startAtLogin = defaults.object(forKey: Self.startAtLoginKey) as? Bool ?? true
         hapticsEnabled = defaults.object(forKey: Self.hapticsKey) as? Bool ?? true
         speechEnabled = defaults.object(forKey: Self.speechKey) as? Bool ?? true
+        suppressPermissionWhenFocused = defaults.object(forKey: Self.suppressPermKey) as? Bool ?? false
 
         let storedSpeechEvents = (defaults.object(forKey: Self.speechEventsKey) as? [String: Bool]) ?? [:]
         var se: [SpeechEvent: Bool] = [:]

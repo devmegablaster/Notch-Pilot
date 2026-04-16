@@ -18,6 +18,7 @@ final class SocketServer: @unchecked Sendable {
 
     struct Request {
         let payload: [String: Any]
+        let peerPID: Int32?
     }
 
     struct Response {
@@ -142,7 +143,11 @@ final class SocketServer: @unchecked Sendable {
             return
         }
 
-        let request = Request(payload: json)
+        // Get the peer PID via LOCAL_PEERPID — the hook script's PID.
+        var peerPID: pid_t = 0
+        var peerPIDLen = socklen_t(MemoryLayout<pid_t>.size)
+        let gotPeer = getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &peerPID, &peerPIDLen)
+        let request = Request(payload: json, peerPID: gotPeer == 0 ? peerPID : nil)
 
         let sema = DispatchSemaphore(value: 0)
         let outgoing = OutgoingBuffer()

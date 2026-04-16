@@ -37,6 +37,12 @@ final class HookBridge: ObservableObject {
     /// instead of waiting for the next user prompt to land in the jsonl.
     @Published private(set) var liveModes: [String: String] = [:]
 
+    /// Maps session ID → the claude process PID, learned from hook events
+    /// and from startup scanning. The hook process is a child of the shell,
+    /// which is a child of claude. Walking the peer PID's parent chain
+    /// finds the claude PID.
+    @Published private(set) var sessionPIDs: [String: Int32] = [:]
+
     private let server = SocketServer()
     private let socketPath: String
     private let settingsPath: String
@@ -97,12 +103,40 @@ final class HookBridge: ObservableObject {
 
         switch event {
         case "PermissionRequest":
+            learnSessionPID(payload: request.payload, peerPID: request.peerPID)
             handlePermission(payload: request.payload, respond: respond)
         case "ModeUpdate":
+            learnSessionPID(payload: request.payload, peerPID: request.peerPID)
             handleModeUpdate(payload: request.payload)
             respond(nil)
         default:
             respond(nil)
+        }
+    }
+
+    /// Walk the hook process's parent chain to find the claude PID.
+    /// Hook → node → shell → claude (or Hook → shell → claude).
+    private func learnSessionPID(payload: [String: Any], peerPID: Int32?) {
+        guard let sessionID = payload["session_id"] as? String,
+              !sessionID.isEmpty,
+              let hookPID = peerPID
+        else { return }
+
+        var current = hookPID
+        for _ in 0..<8 {
+            guard let parent = ProcessLookup.parent(of: current), parent > 1 else { break }
+            let name = (ProcessLookup.name(of: parent) ?? "").lowercased()
+            if name.contains("claude") {
+                sessionPIDs[sessionID] = parent
+                return
+            }
+            // Also check exe path for version-named binaries
+            if let path = ProcessLookup.path(of: parent)?.lowercased(),
+               path.contains("/claude/versions/") || path.hasSuffix("/claude") {
+                sessionPIDs[sessionID] = parent
+                return
+            }
+            current = parent
         }
     }
 
