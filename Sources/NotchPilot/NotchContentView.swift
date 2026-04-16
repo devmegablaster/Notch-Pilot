@@ -8,6 +8,7 @@ struct NotchContentView: View {
     @ObservedObject var usage: UsageAggregator
     @ObservedObject var mouseMonitor: MouseMonitor
     @ObservedObject var speechController: SpeechController
+    @ObservedObject var updateChecker: UpdateChecker
     @EnvironmentObject var prefs: BuddyPreferences
     let notchWidth: CGFloat
     let notchHeight: CGFloat
@@ -1920,6 +1921,9 @@ struct NotchContentView: View {
 
             statBadge
             customizeButton
+            if updateChecker.updateAvailable {
+                updateButton
+            }
             quitButton
         }
     }
@@ -2316,6 +2320,69 @@ struct NotchContentView: View {
         .animation(.easeOut(duration: 0.15), value: customizeHovered)
         .animation(.easeOut(duration: 0.15), value: showingAppearancePicker)
         .help("Customize buddy style, color, and sounds")
+    }
+
+    // MARK: - Update badge
+
+    @State private var updateHovered = false
+    private var updateButton: some View {
+        Button {
+            updateChecker.performUpdate()
+        } label: {
+            ZStack(alignment: .topTrailing) {
+                Group {
+                    if updateChecker.state == .updating {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .scaleEffect(0.7)
+                    } else {
+                        Image(systemName: "arrow.down.circle")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                }
+                .foregroundColor(
+                    updateHovered ? .white.opacity(0.9) : .white.opacity(0.35)
+                )
+                .frame(width: 24, height: 24)
+                .background(
+                    Circle().fill(
+                        updateHovered
+                            ? Color.white.opacity(0.08)
+                            : Color.clear
+                    )
+                )
+                .contentShape(Circle())
+
+                // Green dot
+                if updateChecker.state != .updating {
+                    Circle()
+                        .fill(Color.green)
+                        .frame(width: 7, height: 7)
+                        .offset(x: 1, y: -1)
+                }
+            }
+            .overlay(alignment: .bottom) {
+                if updateHovered {
+                    Text(updateChecker.latestVersion.map { "v\($0) available" }
+                         ?? "Update available")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(Color.black.opacity(0.85))
+                        )
+                        .fixedSize()
+                        .offset(y: 28)
+                        .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(updateChecker.state == .updating)
+        .onHover { updateHovered = $0 }
+        .animation(.easeOut(duration: 0.15), value: updateHovered)
     }
 
     /// Power icon that quits the app. The menu bar icon was removed to

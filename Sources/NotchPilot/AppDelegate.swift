@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let heatmap = HeatmapAggregator()
     private let usage = UsageAggregator()
     private let speechController = SpeechController()
+    private let updateChecker = UpdateChecker()
     private var mouseMonitor: MouseMonitor?
 
     /// UserDefaults key — set to `true` after the onboarding sequence
@@ -17,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let onboardingCompletedKey = "onboardingCompleted"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        checkNodeAvailability()
         HookInstaller.installIfNeeded()
         hookBridge.start()
 
@@ -25,6 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // reveal the notch in its final position, which means the notch
         // needs to already be there.
         startNotchWindow()
+        updateChecker.startPeriodicChecks()
 
         // Force the onboarding on every launch when the debug env var
         // is set (useful for iterating on the intro animation without
@@ -50,7 +53,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             heatmap: heatmap,
             usage: usage,
             mouseMonitor: mm,
-            speechController: speechController
+            speechController: speechController,
+            updateChecker: updateChecker
         )
         window?.show()
         monitor.start()
@@ -71,6 +75,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         self.onboardingWindow = window
         window.orderFront(nil)
+    }
+
+    /// Check if Node.js is on PATH. Without it the permission hook
+    /// script can't run and the core interception feature is dead.
+    /// Shows a macOS alert on first detection so the user knows.
+    private func checkNodeAvailability() {
+        let hasNode = nodeExists()
+        if !hasNode {
+            let suppressed = UserDefaults.standard.bool(forKey: "notchpilot.nodeMissingDismissed")
+            if !suppressed {
+                showNodeMissingAlert()
+            }
+        }
+    }
+
+    private func nodeExists() -> Bool {
+        // Check common paths directly — faster than shelling out
+        let paths = [
+            "/usr/local/bin/node",
+            "/opt/homebrew/bin/node",
+            "/usr/bin/node",
+        ]
+        for p in paths {
+            if FileManager.default.isExecutableFile(atPath: p) { return true }
+        }
+        // Fallback: ask the shell
+        let task = Process()
+        task.launchPath = "/bin/sh"
+        task.arguments = ["-l", "-c", "which node"]
+        task.standardOutput = Pipe()
+        task.standardError = Pipe()
+        do {
+            try task.run()
+            task.waitUntilExit()
+            return task.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+
+    private func showNodeMissingAlert() {
+        let alert = NSAlert()
+        alert.messageText = "Node.js not found"
+        alert.informativeText = """
+            Notch Pilot needs Node.js to intercept Claude Code permission prompts. \
+            Without it, sessions and usage will still work, but permission prompts \
+            won't appear in the notch.
+
+            Install Node.js via:
+              brew install node
+            or download from nodejs.org
+            """
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Don't warn again")
+        let response = alert.runModal()
+        if response == .alertSecondButtonReturn {
+            UserDefaults.standard.set(true, forKey: "notchpilot.nodeMissingDismissed")
+        }
     }
 
     private static func notchGeometry() -> (width: CGFloat, height: CGFloat) {
