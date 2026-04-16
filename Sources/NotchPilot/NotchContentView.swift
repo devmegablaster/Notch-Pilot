@@ -1911,9 +1911,14 @@ struct NotchContentView: View {
             }
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("Notch Pilot")
-                    .font(.system(size: 15, weight: .semibold, design: .rounded))
-                    .foregroundColor(.white)
+                HStack(alignment: .firstTextBaseline, spacing: 5) {
+                    Text("Notch Pilot")
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .foregroundColor(.white)
+                    Text("v\(updateChecker.currentVersion)")
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .foregroundColor(accent.opacity(0.6))
+                }
                 Text(headerSubtitle)
                     .font(.system(size: 11))
                     .foregroundColor(.white.opacity(0.5))
