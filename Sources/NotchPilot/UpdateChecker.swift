@@ -135,10 +135,28 @@ final class UpdateChecker: ObservableObject {
     // MARK: - Homebrew path
 
     private func updateViaBrew(_ brewPath: String) async {
-        let success = await runBrewUpgrade(brewPath)
+        // 1. Update the tap first so brew knows about the new version
+        await runBrewCommand(brewPath, args: ["update"])
+
+        // 2. Run the upgrade
+        let success = await runBrewCommand(brewPath, args: ["upgrade", "--cask", "notch-pilot"])
+
         if success {
-            // Don't rely on the cask postflight — relaunch ourselves
-            // with the same detached script used by the DMG path.
+            // 3. Verify the installed version actually changed
+            let installedVersion = Bundle(path: "/Applications/Notch Pilot.app")?
+                .infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
+            if let latest = latestVersion, isNewer(remote: latest, local: installedVersion) {
+                // Brew said success but version didn't change — try reinstall
+                let reinstalled = await runBrewCommand(brewPath, args: [
+                    "reinstall", "--cask", "notch-pilot"
+                ])
+                if !reinstalled {
+                    state = .failed("Reinstall failed")
+                    return
+                }
+            }
+
+            // Relaunch
             let appPath = "/Applications/Notch Pilot.app"
             let pid = ProcessInfo.processInfo.processIdentifier
             let relaunchScript = FileManager.default.temporaryDirectory
@@ -159,9 +177,7 @@ final class UpdateChecker: ObservableObject {
                 sh.standardOutput = FileHandle.nullDevice
                 sh.standardError = FileHandle.nullDevice
                 try sh.run()
-            } catch {
-                // If the script fails, at least the upgrade happened
-            }
+            } catch {}
             try? await Task.sleep(nanoseconds: 500_000_000)
             NSApp.terminate(nil)
         } else {
@@ -169,11 +185,12 @@ final class UpdateChecker: ObservableObject {
         }
     }
 
-    private nonisolated func runBrewUpgrade(_ brewPath: String) async -> Bool {
+    @discardableResult
+    private nonisolated func runBrewCommand(_ brewPath: String, args: [String]) async -> Bool {
         await withCheckedContinuation { cont in
             let task = Process()
             task.launchPath = brewPath
-            task.arguments = ["upgrade", "--cask", "notch-pilot"]
+            task.arguments = args
             task.standardOutput = Pipe()
             task.standardError = Pipe()
             do {

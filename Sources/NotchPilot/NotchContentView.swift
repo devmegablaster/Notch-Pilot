@@ -1277,7 +1277,7 @@ struct NotchContentView: View {
 
     private func cellColor(intensity: Double, isCurrent: Bool) -> Color {
         if intensity <= 0 {
-            return Color.white.opacity(0.04)
+            return Color.white.opacity(0.08)
         }
         // Ramp from dim orange → full Claude orange based on activity.
         let minOpacity = 0.18
