@@ -601,6 +601,12 @@ struct NotchContentView: View {
                 .padding(.top, max(notchHeight, 14) + 10)
                 .padding(.horizontal, 22)
 
+            if updateChecker.nodeMissing && !updateChecker.nodeBannerDismissed {
+                nodeMissingBanner
+                    .padding(.horizontal, 22)
+                    .padding(.top, 10)
+            }
+
             filterBar
                 .padding(.horizontal, 22)
                 .padding(.top, 12)
@@ -2383,6 +2389,49 @@ struct NotchContentView: View {
         .disabled(updateChecker.state == .updating)
         .onHover { updateHovered = $0 }
         .animation(.easeOut(duration: 0.15), value: updateHovered)
+    }
+
+    // MARK: - Node.js missing banner
+
+    private var nodeMissingBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 11))
+                .foregroundColor(.orange)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Node.js not found")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.9))
+                Text("Permission prompts won't appear. Run: brew install node")
+                    .font(.system(size: 10))
+                    .foregroundColor(.white.opacity(0.5))
+            }
+
+            Spacer(minLength: 4)
+
+            Button {
+                updateChecker.nodeBannerDismissed = true
+                UserDefaults.standard.set(true, forKey: "notchpilot.nodeMissingDismissed")
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.4))
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.orange.opacity(0.1))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.orange.opacity(0.2), lineWidth: 0.5)
+                )
+        )
     }
 
     /// Power icon that quits the app. The menu bar icon was removed to
