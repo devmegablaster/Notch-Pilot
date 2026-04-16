@@ -127,9 +127,13 @@ struct NotchContentView: View {
     }
 
     @State private var permissionSuppressed = false
+    /// Set to true by onChange after the suppress check runs. Prevents
+    /// the permission panel from flickering open for one frame before
+    /// the suppress check has a chance to fire.
+    @State private var permissionChecked = false
 
     private var hasPendingPermission: Bool {
-        hookBridge.pendingPermission != nil && !permissionSuppressed
+        hookBridge.pendingPermission != nil && !permissionSuppressed && permissionChecked
     }
 
     private var effectivelyExpanded: Bool {
@@ -321,6 +325,7 @@ struct NotchContentView: View {
             if oldID != nil && newID == nil {
                 expanded = false
                 permissionSuppressed = false
+                permissionChecked = false
             }
             if let p = hookBridge.pendingPermission, newID != oldID {
                 // Check if we should suppress this permission because
@@ -331,6 +336,7 @@ struct NotchContentView: View {
                 } else {
                     permissionSuppressed = false
                 }
+                permissionChecked = true
                 VoiceAnnouncer.shared.speak(
                     "Claude needs permission for \(p.toolName) in \(p.projectName)",
                     event: .permission,
