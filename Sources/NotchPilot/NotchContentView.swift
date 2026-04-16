@@ -634,7 +634,6 @@ struct NotchContentView: View {
         }
         .frame(width: expandedWidth, height: expandedHeight, alignment: .top)
         .background(shape.fill(Color.black))
-        .shadow(color: .black.opacity(0.4), radius: 14, y: 8)
         .overlay(alignment: .top) {
             if showingAppearancePicker {
                 appearancePickerOverlay
@@ -1898,7 +1897,6 @@ struct NotchContentView: View {
         .padding(.bottom, 18)
         .frame(width: expandedWidth, height: expandedHeight, alignment: .top)
         .background(shape.fill(Color.black))
-        .shadow(color: .black.opacity(0.4), radius: 14, y: 8)
         .contentShape(shape)
         .contextMenu {
             Button("Quit Notch Pilot") { NSApp.terminate(nil) }

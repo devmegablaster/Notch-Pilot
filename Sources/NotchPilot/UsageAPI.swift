@@ -45,7 +45,49 @@ enum UsageAPI {
     /// hits a different identity and prompts the user for their login
     /// keychain password — which is terrible UX and the reason Vibe
     /// Island also uses this exact exec path.
-    static func accessToken() -> String? {
+    private static let clientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+    private static let tokenEndpoint = URL(string: "https://api.anthropic.com/v1/oauth/token")!
+
+    /// In-memory cached token from a refresh — never written to keychain
+    /// to avoid breaking Claude Code's ACL on the credential entry.
+    private static var cachedToken: (token: String, expiresAt: Double)?
+
+    /// Read credentials, refresh if expired, return access token.
+    /// Refreshed tokens are kept in-memory only — the keychain is
+    /// never modified so Claude Code's credential entry stays intact.
+    static func accessToken() async -> String? {
+        // Use in-memory cached token if still valid
+        if let cached = cachedToken {
+            let now = Date().timeIntervalSince1970
+            if now < cached.expiresAt - 300 {
+                return cached.token
+            }
+        }
+
+        guard let creds = readCredentials() else { return nil }
+
+        // Check if keychain token is still valid
+        let expiresAt = creds.expiresAt / 1000 // ms → seconds
+        let now = Date().timeIntervalSince1970
+        if now < expiresAt - 300 {
+            return creds.accessToken
+        }
+
+        // Token expired — refresh and cache in-memory only
+        guard let refreshed = await refreshToken(creds.refreshToken) else {
+            return nil
+        }
+        cachedToken = (refreshed.accessToken, refreshed.expiresAt / 1000)
+        return refreshed.accessToken
+    }
+
+    private struct Credentials {
+        let accessToken: String
+        let refreshToken: String
+        let expiresAt: Double // milliseconds since epoch
+    }
+
+    private static func readCredentials() -> Credentials? {
         let task = Process()
         task.launchPath = "/usr/bin/security"
         task.arguments = [
@@ -70,15 +112,54 @@ enum UsageAPI {
         guard let jsonData = trimmed.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
               let oauth = json["claudeAiOauth"] as? [String: Any],
-              let token = oauth["accessToken"] as? String
+              let token = oauth["accessToken"] as? String,
+              let refresh = oauth["refreshToken"] as? String,
+              let expires = oauth["expiresAt"] as? Double
         else { return nil }
-        return token
+
+        return Credentials(
+            accessToken: token,
+            refreshToken: refresh,
+            expiresAt: expires
+        )
+    }
+
+    private static func refreshToken(_ refreshToken: String) async -> Credentials? {
+        let body = "grant_type=refresh_token&refresh_token=\(refreshToken)&client_id=\(clientID)"
+        var req = URLRequest(url: tokenEndpoint)
+        req.httpMethod = "POST"
+        req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        req.httpBody = body.data(using: .utf8)
+        req.timeoutInterval = 10
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
+            guard let http = response as? HTTPURLResponse,
+                  http.statusCode == 200
+            else { return nil }
+
+            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let newAccess = json["access_token"] as? String,
+                  let newRefresh = json["refresh_token"] as? String,
+                  let expiresIn = json["expires_in"] as? Double
+            else { return nil }
+
+            let newExpiresAt = (Date().timeIntervalSince1970 + expiresIn) * 1000
+
+            return Credentials(
+                accessToken: newAccess,
+                refreshToken: newRefresh,
+                expiresAt: newExpiresAt
+            )
+        } catch {
+            return nil
+        }
     }
 
     /// Hit the usage endpoint with the OAuth token. Returns nil if
     /// the token is missing / expired / the request fails.
     static func fetchUsage() async -> ClaudeUsage? {
-        guard let token = accessToken() else { return nil }
+        guard let token = await accessToken() else { return nil }
 
         var req = URLRequest(url: endpoint)
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
