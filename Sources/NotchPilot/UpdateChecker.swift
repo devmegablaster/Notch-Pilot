@@ -137,9 +137,32 @@ final class UpdateChecker: ObservableObject {
     private func updateViaBrew(_ brewPath: String) async {
         let success = await runBrewUpgrade(brewPath)
         if success {
-            // The cask postflight relaunches the app. Give it a
-            // moment then quit this (old) instance.
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            // Don't rely on the cask postflight — relaunch ourselves
+            // with the same detached script used by the DMG path.
+            let appPath = "/Applications/Notch Pilot.app"
+            let pid = ProcessInfo.processInfo.processIdentifier
+            let relaunchScript = FileManager.default.temporaryDirectory
+                .appendingPathComponent("notchpilot-relaunch.sh")
+            let scriptContent = """
+                #!/bin/sh
+                while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done
+                sleep 0.5
+                open -a "\(appPath)"
+                rm -f "\(relaunchScript.path)"
+                """
+            do {
+                try scriptContent.write(to: relaunchScript, atomically: true, encoding: .utf8)
+                chmod(relaunchScript.path, 0o755)
+                let sh = Process()
+                sh.launchPath = "/bin/sh"
+                sh.arguments = ["-c", "nohup \"\(relaunchScript.path)\" &>/dev/null &"]
+                sh.standardOutput = FileHandle.nullDevice
+                sh.standardError = FileHandle.nullDevice
+                try sh.run()
+            } catch {
+                // If the script fails, at least the upgrade happened
+            }
+            try? await Task.sleep(nanoseconds: 500_000_000)
             NSApp.terminate(nil)
         } else {
             state = .failed("brew upgrade failed")
