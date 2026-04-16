@@ -95,14 +95,16 @@ struct NotchContentView: View {
         //     don't rip it out from under them just because the cursor
         //     moved out of the notch hit rect into the panel body)
         //   - The appearance picker overlay is open
-        prefs.alwaysVisible
+        // Hide in fullscreen if the user opted in.
+        !(prefs.hideInFullscreen && mouseMonitor.isFullscreen)
+        && (prefs.alwaysVisible
             || displayedVisible
             || mouseMonitor.isHoveringNotch
             || expanded
             || showingAppearancePicker
             || inspectedSession != nil
             || speechController.current != nil
-            || usageDetailShown
+            || usageDetailShown)
     }
 
     /// True while the buddy is doing a speech pop-out. Drives the
@@ -689,6 +691,12 @@ struct NotchContentView: View {
 
             if updateChecker.nodeMissing && !updateChecker.nodeBannerDismissed {
                 nodeMissingBanner
+                    .padding(.horizontal, 22)
+                    .padding(.top, 10)
+            }
+
+            if hotkeys.accessibilityMissing {
+                accessibilityBanner
                     .padding(.horizontal, 22)
                     .padding(.top, 10)
             }
@@ -2527,6 +2535,56 @@ struct NotchContentView: View {
         )
     }
 
+    // MARK: - Accessibility missing banner
+
+    private var accessibilityBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "keyboard.fill")
+                .font(.system(size: 11))
+                .foregroundColor(.yellow)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Keyboard shortcuts disabled")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.9))
+                Text("Grant Accessibility access to enable ⌘. ⌘, ⌘\\")
+                    .font(.system(size: 10))
+                    .foregroundColor(.white.opacity(0.5))
+            }
+
+            Spacer(minLength: 4)
+
+            Button {
+                // Open System Settings directly to Accessibility
+                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                    NSWorkspace.shared.open(url)
+                }
+            } label: {
+                Text("Open")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.yellow)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5)
+                            .fill(Color.yellow.opacity(0.12))
+                    )
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.yellow.opacity(0.08))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.yellow.opacity(0.2), lineWidth: 0.5)
+                )
+        )
+    }
+
     /// Power icon that quits the app. The menu bar icon was removed to
     /// keep Notch Pilot's surface area limited to the notch itself, so
     /// this is now the only discoverable quit path (besides right-click
@@ -2764,6 +2822,14 @@ struct NotchContentView: View {
                 title: "Hide permissions when focused",
                 subtitle: "Don't pop the notch if the terminal is already in focus",
                 isOn: $prefs.suppressPermissionWhenFocused
+            )
+
+            behaviorRow(
+                iconOn: "rectangle.inset.filled",
+                iconOff: "rectangle",
+                title: "Hide in fullscreen",
+                subtitle: "Hide the notch when any app is in fullscreen mode",
+                isOn: $prefs.hideInFullscreen
             )
         }
     }

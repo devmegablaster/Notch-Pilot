@@ -5,6 +5,9 @@ import Carbon
 /// is focused. Uses `NSEvent.addGlobalMonitorForEvents` for modifier+key
 /// combos. Since our NSPanel has `canBecomeKey: false`, normal
 /// keyboardShortcut modifiers don't work — we need global monitoring.
+///
+/// Requires Accessibility permissions — on first launch, prompts the
+/// user to grant access in System Settings.
 @MainActor
 final class GlobalHotkeys: ObservableObject {
     /// Fired when the user presses ⌘. (allow)
@@ -18,10 +21,31 @@ final class GlobalHotkeys: ObservableObject {
     /// to toggle its expanded state without needing a direct reference.
     @Published var toggleCount: Int = 0
 
+    /// True when accessibility access is missing — drives an inline
+    /// banner in the notch panel.
+    @Published var accessibilityMissing = false
+
     private var globalMonitor: Any?
     private var localMonitor: Any?
 
     func start() {
+        // Check (and prompt for) accessibility access. This call
+        // shows the macOS "allow Notch Pilot to control your computer"
+        // dialog on first run. If already granted, returns true immediately.
+        let trusted = AXIsProcessTrustedWithOptions(
+            [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
+        )
+
+        if !trusted {
+            accessibilityMissing = true
+            // Poll until the user grants access
+            pollForAccessibility()
+        }
+
+        setupMonitors()
+    }
+
+    private func setupMonitors() {
         // Global monitor — fires when another app is focused
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
             Task { @MainActor in
@@ -29,13 +53,29 @@ final class GlobalHotkeys: ObservableObject {
             }
         }
 
-        // Local monitor — fires when our own app is focused (rare,
-        // but covers the case where the panel somehow gets focus)
+        // Local monitor — fires when our own app is focused
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             Task { @MainActor in
                 self?.handleKey(event)
             }
             return event
+        }
+    }
+
+    /// Poll every 2 seconds until accessibility is granted, then
+    /// restart the monitors (they silently fail without the permission).
+    private func pollForAccessibility() {
+        Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                if AXIsProcessTrusted() {
+                    accessibilityMissing = false
+                    // Restart monitors now that we have permission
+                    stop()
+                    setupMonitors()
+                    return
+                }
+            }
         }
     }
 

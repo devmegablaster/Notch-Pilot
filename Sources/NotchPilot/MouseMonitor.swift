@@ -15,6 +15,7 @@ import Combine
 @MainActor
 final class MouseMonitor: ObservableObject {
     @Published var isHoveringNotch = false
+    @Published var isFullscreen = false
 
     private let notchWidth: CGFloat
     private let notchHeight: CGFloat
@@ -49,6 +50,64 @@ final class MouseMonitor: ObservableObject {
         if inside != isHoveringNotch {
             isHoveringNotch = inside
         }
+
+        // Fullscreen detection: check if the main screen's visible
+        // frame equals its full frame — when an app is fullscreen,
+        // the menu bar is hidden and visibleFrame.height == frame.height.
+        let fs = Self.checkFullscreen()
+        if fs != isFullscreen {
+            isFullscreen = fs
+        }
+    }
+
+    /// Returns true if the frontmost app is in native fullscreen.
+    /// Checks if the frontmost app has a window that fills the screen
+    /// below the notch (Y ≤ safeAreaInsets.top, full width, full
+    /// visible height). In non-fullscreen, windows start below the
+    /// menu bar (Y ≈ 44 on notched Macs with menu bar visible).
+    /// In fullscreen, the menu bar hides and windows start at Y ≈ 39
+    /// (the notch height), filling the visible area.
+    private static func checkFullscreen() -> Bool {
+        guard let screen = NSScreen.main else { return false }
+        guard let frontApp = NSWorkspace.shared.frontmostApplication else { return false }
+
+        // In fullscreen, the menu bar auto-hides. Check if the menu
+        // bar is hidden by comparing visible frame to full frame.
+        // On notched Macs: non-fullscreen visibleFrame.height ≈ frame.height - 39
+        // (menu bar takes ~39px). In fullscreen, visibleFrame stays the
+        // same but the menu bar is auto-hidden — we can detect this by
+        // checking if NSMenu.menuBarVisible() is false.
+        if !NSMenu.menuBarVisible() {
+            return true
+        }
+
+        // Fallback: check if the frontmost app owns a window that
+        // fills the entire visible area starting right below the notch.
+        let pid = frontApp.processIdentifier
+        guard let windowList = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+        ) as? [[String: Any]] else { return false }
+
+        let notchHeight = screen.safeAreaInsets.top
+        for window in windowList {
+            guard let ownerPID = window[kCGWindowOwnerPID as String] as? Int32,
+                  ownerPID == pid,
+                  let bounds = window[kCGWindowBounds as String] as? [String: CGFloat],
+                  let w = bounds["Width"],
+                  let h = bounds["Height"],
+                  let y = bounds["Y"],
+                  (window[kCGWindowLayer as String] as? Int) == 0
+            else { continue }
+
+            // Fullscreen: window at Y=notchHeight, full width, fills
+            // the rest of the screen.
+            if y <= notchHeight + 1
+                && w >= screen.frame.width - 2
+                && h >= screen.frame.height - notchHeight - 2 {
+                return true
+            }
+        }
+        return false
     }
 
     private var enterRect: CGRect { hitRect(margin: 18) }

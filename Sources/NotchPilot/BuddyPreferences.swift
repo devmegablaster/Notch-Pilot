@@ -98,6 +98,14 @@ final class BuddyPreferences: ObservableObject {
         }
     }
 
+    /// When true, the notch hides when any app is in fullscreen mode.
+    /// Defaults true — fullscreen covers the notch area anyway.
+    @Published var hideInFullscreen: Bool {
+        didSet {
+            UserDefaults.standard.set(hideInFullscreen, forKey: Self.hideFullscreenKey)
+        }
+    }
+
     /// When true, permission prompts are suppressed in the notch if the
     /// terminal running the session is the frontmost app. The user can
     /// answer directly in the terminal. Defaults false (always show).
@@ -198,6 +206,7 @@ final class BuddyPreferences: ObservableObject {
     private static let speechKey = "notchpilot.speech"
     private static let speechEventsKey = "notchpilot.speech.events"
     private static let suppressPermKey = "notchpilot.suppressPermissionWhenFocused"
+    private static let hideFullscreenKey = "notchpilot.hideInFullscreen"
 
     init() {
         let defaults = UserDefaults.standard
@@ -212,6 +221,7 @@ final class BuddyPreferences: ObservableObject {
         hapticsEnabled = defaults.object(forKey: Self.hapticsKey) as? Bool ?? true
         speechEnabled = defaults.object(forKey: Self.speechKey) as? Bool ?? true
         suppressPermissionWhenFocused = defaults.object(forKey: Self.suppressPermKey) as? Bool ?? false
+        hideInFullscreen = defaults.object(forKey: Self.hideFullscreenKey) as? Bool ?? true
 
         let storedSpeechEvents = (defaults.object(forKey: Self.speechEventsKey) as? [String: Bool]) ?? [:]
         var se: [SpeechEvent: Bool] = [:]
