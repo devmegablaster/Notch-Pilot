@@ -29,16 +29,15 @@ final class GlobalHotkeys: ObservableObject {
     private var localMonitor: Any?
 
     func start() {
-        // Check (and prompt for) accessibility access. This call
-        // shows the macOS "allow Notch Pilot to control your computer"
-        // dialog on first run. If already granted, returns true immediately.
-        let trusted = AXIsProcessTrustedWithOptions(
-            [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
-        )
-
-        if !trusted {
+        // Check without prompting first — if already granted, skip.
+        if AXIsProcessTrusted() {
+            accessibilityMissing = false
+        } else {
+            // Not trusted — prompt once via the system dialog.
+            AXIsProcessTrustedWithOptions(
+                [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
+            )
             accessibilityMissing = true
-            // Poll until the user grants access
             pollForAccessibility()
         }
 
