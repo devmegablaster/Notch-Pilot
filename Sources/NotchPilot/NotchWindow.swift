@@ -18,7 +18,8 @@ final class NotchWindow: NSPanel {
         usage: UsageAggregator,
         mouseMonitor: MouseMonitor,
         speechController: SpeechController,
-        updateChecker: UpdateChecker
+        updateChecker: UpdateChecker,
+        hotkeys: GlobalHotkeys
     ) {
         guard let screen = NSScreen.main else {
             fatalError("no main screen")
@@ -74,6 +75,7 @@ final class NotchWindow: NSPanel {
             mouseMonitor: mouseMonitor,
             speechController: speechController,
             updateChecker: updateChecker,
+            hotkeys: hotkeys,
             notchWidth: notchWidth,
             notchHeight: notchHeight,
             onVisibilityChange: { [weak self] visible in

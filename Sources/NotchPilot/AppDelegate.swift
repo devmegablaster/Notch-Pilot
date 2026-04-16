@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let usage = UsageAggregator()
     private let speechController = SpeechController()
     private let updateChecker = UpdateChecker()
+    private let hotkeys = GlobalHotkeys()
     private var mouseMonitor: MouseMonitor?
 
     /// UserDefaults key — set to `true` after the onboarding sequence
@@ -29,6 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         startNotchWindow()
         updateChecker.startPeriodicChecks()
         usage.startPeriodicRefresh()
+        setupHotkeys()
 
         // Force the onboarding on every launch when the debug env var
         // is set (useful for iterating on the intro animation without
@@ -55,7 +57,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             usage: usage,
             mouseMonitor: mm,
             speechController: speechController,
-            updateChecker: updateChecker
+            updateChecker: updateChecker,
+            hotkeys: hotkeys
         )
         window?.show()
         monitor.start()
@@ -81,6 +84,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Check if Node.js is on PATH. Without it the permission hook
     /// script can't run. Sets a flag on updateChecker so the notch
     /// panel can show an inline banner.
+    private func setupHotkeys() {
+        hotkeys.onAllow = { [weak self] in
+            guard let perm = self?.hookBridge.pendingPermission else { return }
+            self?.hookBridge.allow(perm)
+        }
+        hotkeys.onDeny = { [weak self] in
+            guard let perm = self?.hookBridge.pendingPermission else { return }
+            self?.hookBridge.deny(perm)
+        }
+        hotkeys.onToggle = { [weak self] in
+            self?.hotkeys.toggleCount += 1
+        }
+        hotkeys.start()
+    }
+
     private func checkNodeAvailability() {
         let dismissed = UserDefaults.standard.bool(forKey: "notchpilot.nodeMissingDismissed")
         if dismissed { return }

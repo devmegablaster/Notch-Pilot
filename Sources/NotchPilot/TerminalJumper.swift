@@ -292,14 +292,33 @@ enum TerminalJumper {
         let task = Process()
         task.launchPath = path
         task.arguments = args
+        // Inherit a useful PATH so tmux and other tools are findable
+        // even when running from a sandboxed .app bundle.
+        var env = ProcessInfo.processInfo.environment
+        let extraPaths = [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/run/current-system/sw/bin",
+            "/nix/var/nix/profiles/default/bin",
+        ]
+        let existingPath = env["PATH"] ?? "/usr/bin:/bin"
+        env["PATH"] = (extraPaths + [existingPath]).joined(separator: ":")
+        task.environment = env
         let out = Pipe()
         task.standardOutput = out
-        task.standardError = Pipe()
+        let err = Pipe()
+        task.standardError = err
         do {
             try task.run()
             task.waitUntilExit()
         } catch {
+            print("[NotchPilot] runProcess failed: \(path) \(args) error: \(error)")
             return nil
+        }
+        if task.terminationStatus != 0 {
+            let errData = err.fileHandleForReading.readDataToEndOfFile()
+            let errStr = String(data: errData, encoding: .utf8) ?? ""
+            print("[NotchPilot] runProcess exit \(task.terminationStatus): \(path) \(args) stderr: \(errStr)")
         }
         let data = out.fileHandleForReading.readDataToEndOfFile()
         return String(data: data, encoding: .utf8)

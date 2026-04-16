@@ -9,6 +9,7 @@ struct NotchContentView: View {
     @ObservedObject var mouseMonitor: MouseMonitor
     @ObservedObject var speechController: SpeechController
     @ObservedObject var updateChecker: UpdateChecker
+    @ObservedObject var hotkeys: GlobalHotkeys
     @EnvironmentObject var prefs: BuddyPreferences
     let notchWidth: CGFloat
     let notchHeight: CGFloat
@@ -335,6 +336,11 @@ struct NotchContentView: View {
                     event: .permission,
                     prefs: prefs
                 )
+            }
+        }
+        .onChange(of: hotkeys.toggleCount) { _, _ in
+            if shouldShow {
+                expanded.toggle()
             }
         }
         .onChange(of: monitor.sessions, initial: true) { _, newSessions in
@@ -1395,19 +1401,19 @@ struct NotchContentView: View {
         HStack(spacing: 8) {
             PermissionButton(
                 label: "Deny",
+                shortcut: "⌘,",
                 style: .ghost,
                 accent: accent,
                 action: { hookBridge.deny(permission) }
             )
-            .keyboardShortcut(.cancelAction)
 
             PermissionButton(
                 label: "Allow",
+                shortcut: "⌘.",
                 style: .primary,
                 accent: accent,
                 action: { hookBridge.allow(permission) }
             )
-            .keyboardShortcut(.defaultAction)
         }
 
         Button { hookBridge.allowAlways(permission) } label: {
@@ -3156,32 +3162,65 @@ private struct PermissionButton: View {
     enum Style { case primary, ghost }
 
     let label: String
+    let shortcut: String?
     let style: Style
     let accent: Color
     let action: () -> Void
+
+    init(label: String, shortcut: String? = nil, style: Style, accent: Color, action: @escaping () -> Void) {
+        self.label = label
+        self.shortcut = shortcut
+        self.style = style
+        self.accent = accent
+        self.action = action
+    }
 
     @State private var hovered = false
 
     var body: some View {
         Button(action: action) {
-            Text(label)
-                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .foregroundColor(foreground)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 11)
-                .background(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(background)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(borderColor, lineWidth: 0.5)
-                )
-                .scaleEffect(hovered ? 1.015 : 1.0)
+            HStack(spacing: 6) {
+                Text(label)
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                if let shortcut {
+                    Text(shortcut)
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundColor(shortcutColor)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .fill(Color.white.opacity(0.12))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                        .strokeBorder(Color.white.opacity(0.15), lineWidth: 0.5)
+                                )
+                        )
+                }
+            }
+            .foregroundColor(foreground)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 11)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(background)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(borderColor, lineWidth: 0.5)
+            )
+            .scaleEffect(hovered ? 1.015 : 1.0)
         }
         .buttonStyle(.plain)
         .onHover { hovered = $0 }
         .animation(.easeOut(duration: 0.12), value: hovered)
+    }
+
+    private var shortcutColor: Color {
+        switch style {
+        case .primary: return .white.opacity(0.75)
+        case .ghost:   return .white.opacity(0.55)
+        }
     }
 
     private var foreground: Color {
