@@ -28,6 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // needs to already be there.
         startNotchWindow()
         updateChecker.startPeriodicChecks()
+        usage.startPeriodicRefresh()
 
         // Force the onboarding on every launch when the debug env var
         // is set (useful for iterating on the intro animation without

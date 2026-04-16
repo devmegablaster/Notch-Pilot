@@ -72,6 +72,13 @@ final class HookBridge: ObservableObject {
             }
         }
 
+        server.onClientDisconnect = { [weak self] payload in
+            guard let self else { return }
+            Task { @MainActor in
+                self.handleHookDisconnect(payload: payload)
+            }
+        }
+
         do {
             try server.start(at: socketPath)
             print("[NotchPilot] Socket listening at \(socketPath)")
@@ -137,8 +144,44 @@ final class HookBridge: ObservableObject {
             sessionID: sessionID,
             cwd: cwd,
             projectName: projectName,
+            createdAt: Date(),
             respond: respond
         ))
+    }
+
+    /// The hook process died before we sent a response — the user
+    /// answered the permission prompt directly in the terminal. Remove
+    /// the matching pending permission so the notch clears it.
+    private func handleHookDisconnect(payload: [String: Any]) {
+        let sessionID = payload["session_id"] as? String ?? ""
+        let toolName = payload["tool_name"] as? String ?? ""
+        if let idx = pendingPermissions.firstIndex(where: {
+            $0.sessionID == sessionID && $0.toolName == toolName
+        }) {
+            pendingPermissions.remove(at: idx)
+        }
+    }
+
+    /// Called periodically (e.g. from the monitor's refresh cycle) with
+    /// live session data. If a session has produced new jsonl activity
+    /// after a pending permission was queued, the user must have answered
+    /// in the terminal — dismiss the stale prompt.
+    func dismissStalePermissions(sessions: [ClaudeSession]) {
+        var dismissed: [UUID] = []
+        for perm in pendingPermissions {
+            // Match by cwd since session_id from the hook might not
+            // match the jsonl-derived session id exactly.
+            if let session = sessions.first(where: { $0.cwd == perm.cwd }) {
+                // If the session's last activity is more than 2 seconds
+                // after the permission was created, it moved on.
+                if session.lastActivity.timeIntervalSince(perm.createdAt) > 2 {
+                    dismissed.append(perm.id)
+                }
+            }
+        }
+        for id in dismissed {
+            removeFromQueue(id: id)
+        }
     }
 
     // MARK: - User actions
@@ -267,6 +310,7 @@ struct PendingPermission: Identifiable {
     let sessionID: String
     let cwd: String
     let projectName: String
+    let createdAt: Date
     let respond: @Sendable (SocketServer.Response?) -> Void
 
     /// A short one-liner describing what the tool wants to do.

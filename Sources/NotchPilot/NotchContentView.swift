@@ -327,6 +327,11 @@ struct NotchContentView: View {
             }
         }
         .onChange(of: monitor.sessions, initial: true) { _, newSessions in
+            // Dismiss permission prompts that the user answered in
+            // the terminal — detected when the session's jsonl shows
+            // new activity after the permission was queued.
+            hookBridge.dismissStalePermissions(sessions: newSessions)
+
             // Build the new set of active session IDs.
             let nowActive = Set(
                 newSessions.filter { !$0.shortStatus.isEmpty }.map(\.id)
@@ -1960,13 +1965,15 @@ struct NotchContentView: View {
                 ZStack(alignment: .leading) {
                     Capsule(style: .continuous)
                         .fill(Color.white.opacity(0.08))
-                    // Progress fill — only when we have live data.
+                    // Progress fill — clip a rectangle to the capsule
+                    // shape so the left edge stays flush at low %.
                     if let util = usage.live?.fiveHour?.utilization {
                         GeometryReader { geo in
-                            Capsule(style: .continuous)
+                            Rectangle()
                                 .fill(usageTint(percent: util).opacity(0.28))
                                 .frame(width: geo.size.width * min(util / 100, 1.0))
                         }
+                        .clipShape(Capsule(style: .continuous))
                     }
                 }
                 .overlay(

@@ -59,6 +59,19 @@ final class UsageAggregator: ObservableObject {
 
     private let refreshInterval: TimeInterval = 60
     private var refreshTask: Task<Void, Never>?
+    private var periodicTask: Task<Void, Never>?
+
+    /// Start a background loop that refreshes every 60s so data is
+    /// always warm when the user opens the notch.
+    func startPeriodicRefresh() {
+        guard periodicTask == nil else { return }
+        periodicTask = Task { [weak self] in
+            while !Task.isCancelled {
+                self?.refreshIfNeeded()
+                try? await Task.sleep(nanoseconds: UInt64(60 * 1_000_000_000))
+            }
+        }
+    }
 
     /// Kick off a refresh if the cache is stale. Safe to call
     /// repeatedly — coalesced internally. Does two things in

@@ -27,6 +27,11 @@ final class SocketServer: @unchecked Sendable {
     typealias Handler = @Sendable (Request, @escaping @Sendable (Response?) -> Void) -> Void
 
     var onRequest: Handler?
+    /// Called on the main actor when the hook process disconnects before
+    /// the server has sent a reply — meaning the user answered in the
+    /// terminal and Claude Code killed the hook. The payload is the
+    /// original request so HookBridge can match and clean up.
+    var onClientDisconnect: (@Sendable ([String: Any]) -> Void)?
 
     private var serverFD: Int32 = -1
     private var acceptSource: DispatchSourceRead?
@@ -151,9 +156,40 @@ final class SocketServer: @unchecked Sendable {
             sema.signal()
         }
 
-        // 120s is plenty for a human to click allow/deny; a stuck permission
-        // shouldn't block Claude forever.
-        if sema.wait(timeout: .now() + 120) == .timedOut { return }
+        // Poll in a loop: wait up to 500ms on the semaphore, then check
+        // if the hook process is still alive by polling the client FD.
+        // If the user answered in the terminal, Claude Code kills the
+        // hook → the FD gets a HUP → we clean up the pending permission.
+        let deadline = DispatchTime.now() + 120
+        var answered = false
+        while DispatchTime.now() < deadline {
+            if sema.wait(timeout: .now() + .milliseconds(500)) == .success {
+                answered = true
+                break
+            }
+            // Check if the hook process disconnected
+            var pfd = pollfd(fd: fd, events: Int16(POLLIN | POLLHUP), revents: 0)
+            let pollResult = poll(&pfd, 1, 0)
+            if pollResult > 0 {
+                let revents = Int32(pfd.revents)
+                if (revents & Int32(POLLHUP)) != 0 || (revents & Int32(POLLERR)) != 0 {
+                    // Hook died — user answered in terminal
+                    onClientDisconnect?(request.payload)
+                    return
+                }
+                // POLLIN with 0 bytes = EOF = disconnected
+                if (revents & Int32(POLLIN)) != 0 {
+                    var peek: UInt8 = 0
+                    let n = recv(fd, &peek, 1, MSG_PEEK | MSG_DONTWAIT)
+                    if n == 0 {
+                        onClientDisconnect?(request.payload)
+                        return
+                    }
+                }
+            }
+        }
+
+        if !answered { return }
 
         if let data = outgoing.get() {
             _ = data.withUnsafeBytes { ptr -> Int in
