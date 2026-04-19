@@ -115,7 +115,8 @@ final class HookBridge: ObservableObject {
     }
 
     /// Walk the hook process's parent chain to find the claude PID.
-    /// Hook → node → shell → claude (or Hook → shell → claude).
+    /// Hook → shell → claude (the hook is this app's binary, spawned
+    /// by Claude Code via the shell invocation in settings.json).
     private func learnSessionPID(payload: [String: Any], peerPID: Int32?) {
         guard let sessionID = payload["session_id"] as? String,
               !sessionID.isEmpty,

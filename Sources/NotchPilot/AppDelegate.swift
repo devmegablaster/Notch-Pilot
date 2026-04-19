@@ -19,7 +19,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let onboardingCompletedKey = "onboardingCompleted"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        checkNodeAvailability()
         HookInstaller.installIfNeeded()
         hookBridge.start()
 
@@ -81,9 +80,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.orderFront(nil)
     }
 
-    /// Check if Node.js is on PATH. Without it the permission hook
-    /// script can't run. Sets a flag on updateChecker so the notch
-    /// panel can show an inline banner.
     private func setupHotkeys() {
         hotkeys.onAllow = { [weak self] in
             guard let perm = self?.hookBridge.pendingPermission else { return }
@@ -97,37 +93,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.hotkeys.toggleCount += 1
         }
         hotkeys.start()
-    }
-
-    private func checkNodeAvailability() {
-        let dismissed = UserDefaults.standard.bool(forKey: "notchpilot.nodeMissingDismissed")
-        if dismissed { return }
-        if !nodeExists() {
-            updateChecker.nodeMissing = true
-        }
-    }
-
-    private func nodeExists() -> Bool {
-        let paths = [
-            "/usr/local/bin/node",
-            "/opt/homebrew/bin/node",
-            "/usr/bin/node",
-        ]
-        for p in paths {
-            if FileManager.default.isExecutableFile(atPath: p) { return true }
-        }
-        let task = Process()
-        task.launchPath = "/bin/sh"
-        task.arguments = ["-l", "-c", "which node"]
-        task.standardOutput = Pipe()
-        task.standardError = Pipe()
-        do {
-            try task.run()
-            task.waitUntilExit()
-            return task.terminationStatus == 0
-        } catch {
-            return false
-        }
     }
 
     private static func notchGeometry() -> (width: CGFloat, height: CGFloat) {

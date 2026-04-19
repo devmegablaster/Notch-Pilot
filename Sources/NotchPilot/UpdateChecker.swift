@@ -21,8 +21,6 @@ final class UpdateChecker: ObservableObject {
     @Published private(set) var releaseURL: URL?
     @Published private(set) var dmgURL: URL?
     @Published private(set) var state: UpdateState = .idle
-    @Published var nodeMissing = false
-    @Published var nodeBannerDismissed = false
 
     private let owner = "devmegablaster"
     private let repo = "Notch-Pilot"
