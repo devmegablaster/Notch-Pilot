@@ -20,6 +20,7 @@ final class MouseMonitor: ObservableObject {
     private let notchWidth: CGFloat
     private let notchHeight: CGFloat
     private var timer: Timer?
+    private var fullscreenTickCounter = 0
 
     init(notchWidth: CGFloat, notchHeight: CGFloat) {
         self.notchWidth = notchWidth
@@ -51,63 +52,43 @@ final class MouseMonitor: ObservableObject {
             isHoveringNotch = inside
         }
 
-        // Fullscreen detection: check if the main screen's visible
-        // frame equals its full frame — when an app is fullscreen,
-        // the menu bar is hidden and visibleFrame.height == frame.height.
-        let fs = Self.checkFullscreen()
-        if fs != isFullscreen {
-            isFullscreen = fs
+        // AX queries cost a few ms of IPC — only poll fullscreen
+        // state once per second, not every 100ms.
+        fullscreenTickCounter += 1
+        if fullscreenTickCounter >= 10 {
+            fullscreenTickCounter = 0
+            let fs = Self.checkFullscreen()
+            if fs != isFullscreen {
+                isFullscreen = fs
+            }
         }
     }
 
-    /// Returns true if the frontmost app is in native fullscreen.
-    /// Checks if the frontmost app has a window that fills the screen
-    /// below the notch (Y ≤ safeAreaInsets.top, full width, full
-    /// visible height). In non-fullscreen, windows start below the
-    /// menu bar (Y ≈ 44 on notched Macs with menu bar visible).
-    /// In fullscreen, the menu bar hides and windows start at Y ≈ 39
-    /// (the notch height), filling the visible area.
+    /// Returns true if the frontmost app's focused window is in native
+    /// fullscreen. Uses Accessibility (AXFullScreen) — the authoritative
+    /// signal for true fullscreen across other apps. We avoid heuristics
+    /// based on menu-bar visibility or window bounds: the menu bar
+    /// auto-hides for reasons unrelated to fullscreen (System Settings
+    /// → Control Center → "Automatically hide and show the menu bar"),
+    /// and on notched Macs with the Dock auto-hidden, a plain maximized
+    /// window has identical bounds to a fit-below fullscreen app.
     private static func checkFullscreen() -> Bool {
-        guard let screen = NSScreen.main else { return false }
         guard let frontApp = NSWorkspace.shared.frontmostApplication else { return false }
+        let appRef = AXUIElementCreateApplication(frontApp.processIdentifier)
 
-        // In fullscreen, the menu bar auto-hides. Check if the menu
-        // bar is hidden by comparing visible frame to full frame.
-        // On notched Macs: non-fullscreen visibleFrame.height ≈ frame.height - 39
-        // (menu bar takes ~39px). In fullscreen, visibleFrame stays the
-        // same but the menu bar is auto-hidden — we can detect this by
-        // checking if NSMenu.menuBarVisible() is false.
-        if !NSMenu.menuBarVisible() {
-            return true
-        }
+        var focusedValue: AnyObject?
+        let focusedResult = AXUIElementCopyAttributeValue(
+            appRef, kAXFocusedWindowAttribute as CFString, &focusedValue
+        )
+        guard focusedResult == .success, let window = focusedValue else { return false }
+        let windowRef = window as! AXUIElement
 
-        // Fallback: check if the frontmost app owns a window that
-        // fills the entire visible area starting right below the notch.
-        let pid = frontApp.processIdentifier
-        guard let windowList = CGWindowListCopyWindowInfo(
-            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
-        ) as? [[String: Any]] else { return false }
-
-        let notchHeight = screen.safeAreaInsets.top
-        for window in windowList {
-            guard let ownerPID = window[kCGWindowOwnerPID as String] as? Int32,
-                  ownerPID == pid,
-                  let bounds = window[kCGWindowBounds as String] as? [String: CGFloat],
-                  let w = bounds["Width"],
-                  let h = bounds["Height"],
-                  let y = bounds["Y"],
-                  (window[kCGWindowLayer as String] as? Int) == 0
-            else { continue }
-
-            // Fullscreen: window at Y=notchHeight, full width, fills
-            // the rest of the screen.
-            if y <= notchHeight + 1
-                && w >= screen.frame.width - 2
-                && h >= screen.frame.height - notchHeight - 2 {
-                return true
-            }
-        }
-        return false
+        var fullscreenValue: AnyObject?
+        let fsResult = AXUIElementCopyAttributeValue(
+            windowRef, "AXFullScreen" as CFString, &fullscreenValue
+        )
+        guard fsResult == .success, let isFS = fullscreenValue as? Bool else { return false }
+        return isFS
     }
 
     private var enterRect: CGRect { hitRect(margin: 18) }
