@@ -58,17 +58,29 @@ final class UsageAggregator: ObservableObject {
     }
 
     private let refreshInterval: TimeInterval = 60
+    /// When a previous fetch failed (or we never got live data at all)
+    /// we want to retry much sooner than the steady-state 60 s. Without
+    /// this the user would stare at a blank "—" pill for up to a full
+    /// minute every time the OAuth token briefly went stale.
+    private let retryInterval: TimeInterval = 10
+    /// Earliest time the next API call is allowed — pushed into the
+    /// future when Anthropic returns 429 so we honor `Retry-After`
+    /// instead of hammering the endpoint every retry tick.
+    private var rateLimitedUntil: Date?
     private var refreshTask: Task<Void, Never>?
     private var periodicTask: Task<Void, Never>?
 
     /// Start a background loop that refreshes every 60s so data is
-    /// always warm when the user opens the notch.
+    /// always warm when the user opens the notch. Retries faster
+    /// (every 10s) until we have a live reading.
     func startPeriodicRefresh() {
         guard periodicTask == nil else { return }
         periodicTask = Task { [weak self] in
             while !Task.isCancelled {
                 self?.refreshIfNeeded()
-                try? await Task.sleep(nanoseconds: UInt64(60 * 1_000_000_000))
+                let needsFastRetry = await MainActor.run { self?.live == nil }
+                let nextWaitSeconds: UInt64 = needsFastRetry ? 10 : 60
+                try? await Task.sleep(nanoseconds: nextWaitSeconds * 1_000_000_000)
             }
         }
     }
@@ -78,11 +90,35 @@ final class UsageAggregator: ObservableObject {
     /// parallel: a jsonl scan for the token breakdown, and a call
     /// to Anthropic's oauth/usage endpoint for the real percentages.
     func refreshIfNeeded() {
-        if let last = lastRefreshed,
-           Date().timeIntervalSince(last) < refreshInterval {
+        if let until = rateLimitedUntil, Date() < until {
+            print(String(
+                format: "[Usage] gated by rate limit · %.0fs remaining",
+                until.timeIntervalSinceNow
+            ))
             return
         }
-        if refreshTask != nil { return }
+        if let last = lastRefreshed {
+            // Use the shorter retry interval as long as we don't have
+            // a live reading yet — the typical cause of a missing live
+            // reading is a transient token-refresh window, and we
+            // want the pill to come alive again quickly.
+            let interval = (live == nil) ? retryInterval : refreshInterval
+            let elapsed = Date().timeIntervalSince(last)
+            if elapsed < interval {
+                print(String(
+                    format: "[Usage] gated · liveCached=%@ elapsed=%.1fs interval=%.0fs",
+                    live == nil ? "no" : "yes", elapsed, interval
+                ))
+                return
+            }
+        }
+        if refreshTask != nil {
+            print("[Usage] refresh already in flight, skipping")
+            return
+        }
+
+        let startedAt = Date()
+        print("[Usage] refresh start · liveCached=\(live == nil ? "no" : "yes")")
 
         refreshTask = Task { [weak self] in
             async let scanned = Task.detached(priority: .utility) {
@@ -91,14 +127,36 @@ final class UsageAggregator: ObservableObject {
             async let fetched = UsageAPI.fetchUsage()
 
             let result = await scanned
-            let liveUsage = await fetched
+            let outcome = await fetched
 
             await MainActor.run {
                 guard let self = self else { return }
+                let elapsed = Date().timeIntervalSince(startedAt)
                 self.last5h = result.last5h
                 self.today = result.today
                 self.week = result.week
-                self.live = liveUsage
+                switch outcome {
+                case .success(let liveUsage):
+                    self.live = liveUsage
+                    self.rateLimitedUntil = nil
+                    let pct5h = liveUsage.fiveHour?.utilization ?? -1
+                    let pctWk = liveUsage.sevenDay?.utilization ?? -1
+                    print(String(
+                        format: "[Usage] refresh ok in %.2fs · 5h=%.0f%% wk=%.0f%%",
+                        elapsed, pct5h, pctWk
+                    ))
+                case .rateLimited(let retryAfter):
+                    self.rateLimitedUntil = Date().addingTimeInterval(retryAfter)
+                    print(String(
+                        format: "[Usage] rate limited · pausing fetches for %.0fs",
+                        retryAfter
+                    ))
+                case .failed:
+                    print(String(
+                        format: "[Usage] refresh failed in %.2fs · keeping previous live=%@",
+                        elapsed, self.live == nil ? "nil" : "stale"
+                    ))
+                }
                 self.lastRefreshed = Date()
                 self.refreshTask = nil
             }

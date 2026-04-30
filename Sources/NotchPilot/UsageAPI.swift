@@ -27,6 +27,15 @@ struct ClaudeUsage: Equatable {
     let fetchedAt: Date
 }
 
+/// Outcome of a single usage-endpoint hit. The aggregator uses
+/// `.rateLimited(retryAfter:)` to back off so we don't keep
+/// hammering the endpoint while Anthropic is throttling us.
+enum UsageFetchOutcome {
+    case success(ClaudeUsage)
+    case rateLimited(retryAfter: TimeInterval)
+    case failed
+}
+
 /// Wraps the Anthropic API calls + Keychain credential read. All of
 /// this is best-effort — on any failure we return nil and callers
 /// fall back to local jsonl-derived data.
@@ -51,14 +60,30 @@ enum UsageAPI {
     /// If the token is expired and Claude Code hasn't refreshed it,
     /// we return nil and the UI falls back to jsonl-derived data.
     static func accessToken() async -> String? {
-        guard let creds = readCredentials() else { return nil }
+        let start = Date()
+        guard let creds = readCredentials() else {
+            print(String(
+                format: "[UsageAPI] keychain read failed in %.2fs",
+                Date().timeIntervalSince(start)
+            ))
+            return nil
+        }
 
         let expiresAt = creds.expiresAt / 1000
         let now = Date().timeIntervalSince1970
+        let secondsUntilExpiry = expiresAt - now
+        let readTime = Date().timeIntervalSince(start)
         if now < expiresAt {
+            print(String(
+                format: "[UsageAPI] keychain read ok in %.2fs · token expires in %.0fs",
+                readTime, secondsUntilExpiry
+            ))
             return creds.accessToken
         }
-
+        print(String(
+            format: "[UsageAPI] token expired (by %.0fs) · returning nil",
+            -secondsUntilExpiry
+        ))
         // Expired — return nil, UI will show fallback
         return nil
     }
@@ -115,24 +140,68 @@ enum UsageAPI {
         )
     }
 
-    /// Hit the usage endpoint with the OAuth token. Returns nil if
-    /// the token is missing / expired / the request fails.
-    static func fetchUsage() async -> ClaudeUsage? {
-        guard let token = await accessToken() else { return nil }
+    /// Default backoff when Anthropic returns 429 without a
+    /// `Retry-After` header — generous enough that we don't end up in
+    /// a 429 loop on a fresh launch.
+    private static let defaultRateLimitBackoff: TimeInterval = 60
+
+    /// Hit the usage endpoint with the OAuth token. Returns a
+    /// structured outcome so the caller can distinguish a transient
+    /// failure (worth retrying soon) from a rate-limit response
+    /// (must wait at least `retryAfter` seconds).
+    static func fetchUsage() async -> UsageFetchOutcome {
+        guard let token = await accessToken() else { return .failed }
 
         var req = URLRequest(url: endpoint)
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
         req.timeoutInterval = 8
 
+        let start = Date()
         do {
             let (data, response) = try await URLSession.shared.data(for: req)
-            guard let http = response as? HTTPURLResponse,
-                  http.statusCode == 200
-            else { return nil }
-            return parse(data)
+            let elapsed = Date().timeIntervalSince(start)
+            guard let http = response as? HTTPURLResponse else {
+                print(String(
+                    format: "[UsageAPI] non-HTTP response in %.2fs", elapsed
+                ))
+                return .failed
+            }
+            if http.statusCode == 429 {
+                let retryAfter = (http.value(forHTTPHeaderField: "Retry-After")
+                    .flatMap(TimeInterval.init)) ?? defaultRateLimitBackoff
+                print(String(
+                    format: "[UsageAPI] HTTP 429 in %.2fs · backing off %.0fs",
+                    elapsed, retryAfter
+                ))
+                return .rateLimited(retryAfter: retryAfter)
+            }
+            guard http.statusCode == 200 else {
+                let body = String(data: data, encoding: .utf8)?.prefix(200) ?? ""
+                print(String(
+                    format: "[UsageAPI] HTTP %d in %.2fs · body=%@",
+                    http.statusCode, elapsed, String(body)
+                ))
+                return .failed
+            }
+            guard let parsed = parse(data) else {
+                print(String(
+                    format: "[UsageAPI] HTTP 200 in %.2fs · parse failed", elapsed
+                ))
+                return .failed
+            }
+            print(String(
+                format: "[UsageAPI] HTTP 200 in %.2fs · parsed ok",
+                elapsed
+            ))
+            return .success(parsed)
         } catch {
-            return nil
+            let elapsed = Date().timeIntervalSince(start)
+            print(String(
+                format: "[UsageAPI] request error in %.2fs: %@",
+                elapsed, String(describing: error)
+            ))
+            return .failed
         }
     }
 

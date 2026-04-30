@@ -14,7 +14,7 @@ final class NotchWindow: NSPanel {
     /// positions. `topCenter` on a notched screen stays flush so the
     /// pill flows seamlessly out of the hardware notch; everything else
     /// gets a small gap so it doesn't look stuck to the menu-bar edge.
-    private static let floatingTopGap: CGFloat = 1
+    private static let floatingTopGap: CGFloat = 2
 
     /// Width / height of the expanded panel (kept fixed across positions
     /// so the panel layout doesn't need to reflow).
@@ -25,6 +25,12 @@ final class NotchWindow: NSPanel {
     // the window can follow width and height changes — width for
     // status-text length, height for the speech pop-out.
     private var lastCollapsedSize: CGSize = .zero
+    /// Tracks whether the panel is currently in expanded-frame mode.
+    /// Used to no-op `updateCollapsed` while expanded so the SwiftUI
+    /// re-render that fires both onChange(of:collapsedSize) and
+    /// onChange(of:effectivelyExpanded) doesn't have the collapse
+    /// callback clobber the expand animation.
+    private var isExpanded = false
     /// True between the drag-threshold being crossed and mouseUp. While
     /// set, frame updates from prefs/state callbacks are suppressed so
     /// we don't fight the drag.
@@ -60,18 +66,26 @@ final class NotchWindow: NSPanel {
         updateChecker: UpdateChecker,
         hotkeys: GlobalHotkeys
     ) {
-        guard let screen = NSScreen.main else {
+        // Notch dimensions come from a *notched* display whenever one
+        // is connected, even if the user happens to be focused on an
+        // external monitor at launch — otherwise we'd cache the
+        // 200/32 defaults forever and the silhouette wouldn't be wide
+        // enough to cover the actual hardware notch when the user
+        // dragged back to the MacBook screen.
+        guard let mainScreen = NSScreen.main else {
             fatalError("no main screen")
         }
-        let screenFrame = screen.frame
+        let dimensionsScreen = NSScreen.screens.first(where: {
+            $0.safeAreaInsets.top > 0
+        }) ?? mainScreen
 
-        let nh: CGFloat = screen.safeAreaInsets.top > 0
-            ? screen.safeAreaInsets.top
+        let nh: CGFloat = dimensionsScreen.safeAreaInsets.top > 0
+            ? dimensionsScreen.safeAreaInsets.top
             : 32
         var nw: CGFloat = 200
-        if let leftArea = screen.auxiliaryTopLeftArea,
-           let rightArea = screen.auxiliaryTopRightArea {
-            let derived = screenFrame.width - leftArea.width - rightArea.width
+        if let leftArea = dimensionsScreen.auxiliaryTopLeftArea,
+           let rightArea = dimensionsScreen.auxiliaryTopRightArea {
+            let derived = dimensionsScreen.frame.width - leftArea.width - rightArea.width
             if derived > 40 {
                 nw = derived
             }
@@ -80,6 +94,8 @@ final class NotchWindow: NSPanel {
         self.notchWidth = nw
         self.notchHeight = nh
         self.preferences = preferences
+
+        let screenFrame = mainScreen.frame
 
         // Start with a tiny 1×1 frame at the top-center. The first state
         // callback from the view will resize us into place.
@@ -180,16 +196,26 @@ final class NotchWindow: NSPanel {
     // MARK: - Frame helpers
 
     /// The screen the notch is currently anchored to. Honors the user's
-    /// saved choice; falls back to the system primary screen when the
-    /// saved display is no longer connected.
+    /// saved choice; falls back to a notched display, then the system
+    /// primary, when the saved display isn't connected.
     private var currentScreen: NSScreen {
-        if let saved = preferences.notchScreenID,
-           let match = NSScreen.screens.first(where: {
-               Self.displayID(of: $0) == saved
-           }) {
+        Self.resolveScreen(savedID: preferences.notchScreenID)
+    }
+
+    /// Stable screen resolver shared with `NotchContentView` so the
+    /// content's silhouette decision and the window's positioning agree
+    /// on which display the notch lives on. Avoids `NSScreen.main` —
+    /// that one tracks keyboard focus and would flip every time the
+    /// user clicks an app on a different monitor.
+    static func resolveScreen(savedID: CGDirectDisplayID?) -> NSScreen {
+        if let id = savedID,
+           let match = NSScreen.screens.first(where: { displayID(of: $0) == id }) {
             return match
         }
-        return NSScreen.main ?? NSScreen.screens.first!
+        if let notched = NSScreen.screens.first(where: { $0.safeAreaInsets.top > 0 }) {
+            return notched
+        }
+        return NSScreen.screens.first ?? NSScreen.main!
     }
 
     /// `topCenter` keeps the original 560-wide window so the
@@ -294,9 +320,8 @@ final class NotchWindow: NSPanel {
     /// Called from prefs / screen-change observers.
     private func repositionForCurrentState() {
         guard !isUserDragging else { return }
-        let isExpandedNow = self.frame.size == expandedFrame().size
         let target: NSRect
-        if isExpandedNow {
+        if isExpanded {
             target = expandedFrame()
         } else if lastCollapsedSize.width > 0 {
             target = collapsedFrame(size: lastCollapsedSize)
@@ -445,24 +470,23 @@ final class NotchWindow: NSPanel {
 
     private func updateCollapsed(size: CGSize) {
         lastCollapsedSize = size
-        // Only apply if we're currently in the collapsed state. The
-        // expanded-frame callback owns the frame while expanded.
-        let currentFrame = self.frame
-        let expected = expandedFrame()
-        if currentFrame.size != expected.size {
-            // Animate so the speech pop-out physically grows rather
-            // than hard-resizing to its new frame.
-            let target = collapsedFrame(size: size)
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.28
-                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                self.animator().setFrame(target, display: true)
-            }
-            clickHost.hitShape = .centered(width: size.width)
+        // While the panel is expanded the expand animation owns the
+        // frame. Bailing here is what stops a SwiftUI re-render that
+        // happens to also touch collapsedSize (e.g. showPermissionAlert
+        // toggling) from racing the expand and snapping the window
+        // back to pill-height.
+        if isExpanded { return }
+        let target = collapsedFrame(size: size)
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.28
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            self.animator().setFrame(target, display: true)
         }
+        clickHost.hitShape = .centered(width: size.width)
     }
 
     private func updateExpanded(_ expanded: Bool) {
+        isExpanded = expanded
         let target = expanded ? expandedFrame() : collapsedFrame(size: lastCollapsedSize)
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.22

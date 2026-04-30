@@ -2,6 +2,57 @@ import SwiftUI
 import ServiceManagement
 import CoreGraphics
 
+/// Which utilization window the usage slot displays. The two values
+/// match the windows Claude's account page shows: a rolling 5-hour
+/// session limit and a rolling 7-day plan limit.
+enum UsageSlotWindow: String, CaseIterable, Identifiable {
+    case fiveHour
+    case weekly
+
+    var id: String { rawValue }
+
+    /// Short label used in the pill itself (squeezed next to the
+    /// percentage). Kept short so the capsule stays tight.
+    var shortLabel: String {
+        switch self {
+        case .fiveHour: return "5h"
+        case .weekly:   return "wk"
+        }
+    }
+
+    /// Longer label used in the settings row.
+    var label: String {
+        switch self {
+        case .fiveHour: return "5h"
+        case .weekly:   return "Weekly"
+        }
+    }
+}
+
+/// One configurable cell inside the notch pill. The pill has 3 slots
+/// (left, center, right); each one renders one of these. `empty` keeps
+/// the slot's width but draws nothing — the notch's overall shape stays
+/// the same regardless of which slots are filled. On a notched primary
+/// in topCenter the center slot's value is ignored: the hardware notch
+/// occupies that slot.
+enum NotchSlotItem: String, CaseIterable, Identifiable {
+    case empty
+    case buddy
+    case status
+    case usage
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .empty:  return "None"
+        case .buddy:  return "Buddy"
+        case .status: return "Status"
+        case .usage:  return "Usage"
+        }
+    }
+}
+
 /// Where the notch overlay lives on its host screen. `topCenter` on the
 /// primary notched display is the original behavior — sits in the
 /// hardware notch. The other zones float as a rounded pill flush with
@@ -258,6 +309,39 @@ final class BuddyPreferences: ObservableObject {
         }
     }
 
+    /// What's drawn in the left slot of the pill. Defaults to the buddy
+    /// face — that's where it has always lived.
+    @Published var notchLeftSlot: NotchSlotItem {
+        didSet {
+            UserDefaults.standard.set(notchLeftSlot.rawValue, forKey: Self.notchLeftSlotKey)
+        }
+    }
+
+    /// What's drawn in the center slot. Ignored on the notched primary
+    /// in topCenter (hardware notch occupies the slot). Defaults to
+    /// `.empty` so silhouette mode keeps its current look.
+    @Published var notchCenterSlot: NotchSlotItem {
+        didSet {
+            UserDefaults.standard.set(notchCenterSlot.rawValue, forKey: Self.notchCenterSlotKey)
+        }
+    }
+
+    /// What's drawn in the right slot. Defaults to the session-status
+    /// text — same as today.
+    @Published var notchRightSlot: NotchSlotItem {
+        didSet {
+            UserDefaults.standard.set(notchRightSlot.rawValue, forKey: Self.notchRightSlotKey)
+        }
+    }
+
+    /// Which utilization window the `usage` slot shows. Only relevant
+    /// when one of the slots is set to `.usage`.
+    @Published var usageSlotWindow: UsageSlotWindow {
+        didSet {
+            UserDefaults.standard.set(usageSlotWindow.rawValue, forKey: Self.usageSlotWindowKey)
+        }
+    }
+
     private static let styleKey = "notchpilot.style"
     private static let colorKey = "notchpilot.color"
     private static let voiceKey = "notchpilot.voice"
@@ -271,6 +355,10 @@ final class BuddyPreferences: ObservableObject {
     private static let hideFullscreenKey = "notchpilot.hideInFullscreen"
     private static let notchPositionKey = "notchpilot.notchPosition"
     private static let notchScreenIDKey = "notchpilot.notchScreenID"
+    private static let notchLeftSlotKey = "notchpilot.notchLeftSlot"
+    private static let notchCenterSlotKey = "notchpilot.notchCenterSlot"
+    private static let notchRightSlotKey = "notchpilot.notchRightSlot"
+    private static let usageSlotWindowKey = "notchpilot.usageSlotWindow"
 
     init() {
         let defaults = UserDefaults.standard
@@ -294,6 +382,15 @@ final class BuddyPreferences: ObservableObject {
         } else {
             notchScreenID = nil
         }
+
+        let storedLeft = defaults.string(forKey: Self.notchLeftSlotKey) ?? ""
+        notchLeftSlot = NotchSlotItem(rawValue: storedLeft) ?? .buddy
+        let storedCenter = defaults.string(forKey: Self.notchCenterSlotKey) ?? ""
+        notchCenterSlot = NotchSlotItem(rawValue: storedCenter) ?? .empty
+        let storedRight = defaults.string(forKey: Self.notchRightSlotKey) ?? ""
+        notchRightSlot = NotchSlotItem(rawValue: storedRight) ?? .status
+        let storedWindow = defaults.string(forKey: Self.usageSlotWindowKey) ?? ""
+        usageSlotWindow = UsageSlotWindow(rawValue: storedWindow) ?? .fiveHour
 
         let storedSpeechEvents = (defaults.object(forKey: Self.speechEventsKey) as? [String: Bool]) ?? [:]
         var se: [SpeechEvent: Bool] = [:]

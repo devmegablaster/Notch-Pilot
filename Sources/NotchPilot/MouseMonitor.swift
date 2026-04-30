@@ -15,7 +15,15 @@ import Combine
 @MainActor
 final class MouseMonitor: ObservableObject {
     @Published var isHoveringNotch = false
-    @Published var isFullscreen = false
+    /// The display that currently has a true-fullscreen frontmost app,
+    /// or `nil` if nothing is in fullscreen. Multi-display: a fullscreen
+    /// app on one screen shouldn't force the notch to hide on a different
+    /// screen, so consumers compare this against the notch's own screen.
+    @Published var fullscreenScreenID: CGDirectDisplayID? = nil
+
+    /// Convenience for any binding that just wants a Bool. Stays in
+    /// sync with `fullscreenScreenID`.
+    var isFullscreen: Bool { fullscreenScreenID != nil }
 
     private let notchWidth: CGFloat
     private let notchHeight: CGFloat
@@ -57,38 +65,55 @@ final class MouseMonitor: ObservableObject {
         fullscreenTickCounter += 1
         if fullscreenTickCounter >= 10 {
             fullscreenTickCounter = 0
-            let fs = Self.checkFullscreen()
-            if fs != isFullscreen {
-                isFullscreen = fs
+            let fs = Self.checkFullscreenScreen()
+            if fs != fullscreenScreenID {
+                fullscreenScreenID = fs
             }
         }
     }
 
-    /// Returns true if the frontmost app's focused window is in native
-    /// fullscreen. Uses Accessibility (AXFullScreen) — the authoritative
-    /// signal for true fullscreen across other apps. We avoid heuristics
-    /// based on menu-bar visibility or window bounds: the menu bar
-    /// auto-hides for reasons unrelated to fullscreen (System Settings
-    /// → Control Center → "Automatically hide and show the menu bar"),
-    /// and on notched Macs with the Dock auto-hidden, a plain maximized
-    /// window has identical bounds to a fit-below fullscreen app.
-    private static func checkFullscreen() -> Bool {
-        guard let frontApp = NSWorkspace.shared.frontmostApplication else { return false }
+    /// Returns the display ID of the screen with a true-fullscreen
+    /// frontmost app, or `nil` if nothing is fullscreen. Uses
+    /// Accessibility (AXFullScreen) — the authoritative signal for
+    /// true fullscreen across other apps — and AXPosition to find the
+    /// screen that window lives on, so a fullscreen on display A
+    /// doesn't force the notch to hide on display B.
+    private static func checkFullscreenScreen() -> CGDirectDisplayID? {
+        guard let frontApp = NSWorkspace.shared.frontmostApplication else { return nil }
         let appRef = AXUIElementCreateApplication(frontApp.processIdentifier)
 
         var focusedValue: AnyObject?
-        let focusedResult = AXUIElementCopyAttributeValue(
+        guard AXUIElementCopyAttributeValue(
             appRef, kAXFocusedWindowAttribute as CFString, &focusedValue
-        )
-        guard focusedResult == .success, let window = focusedValue else { return false }
+        ) == .success, let window = focusedValue else { return nil }
         let windowRef = window as! AXUIElement
 
-        var fullscreenValue: AnyObject?
-        let fsResult = AXUIElementCopyAttributeValue(
-            windowRef, "AXFullScreen" as CFString, &fullscreenValue
-        )
-        guard fsResult == .success, let isFS = fullscreenValue as? Bool else { return false }
-        return isFS
+        var fsValue: AnyObject?
+        guard AXUIElementCopyAttributeValue(
+            windowRef, "AXFullScreen" as CFString, &fsValue
+        ) == .success, let isFS = fsValue as? Bool, isFS else { return nil }
+
+        // Find which display the focused window is on. AX returns
+        // top-left-origin (Carbon) coords; convert to AppKit's
+        // bottom-left-of-primary origin so we can match against
+        // NSScreen frames.
+        var posValue: AnyObject?
+        guard AXUIElementCopyAttributeValue(
+            windowRef, kAXPositionAttribute as CFString, &posValue
+        ) == .success else { return nil }
+        var pos = CGPoint.zero
+        AXValueGetValue(posValue as! AXValue, .cgPoint, &pos)
+
+        guard let primary = NSScreen.screens.first else { return nil }
+        let appKit = CGPoint(x: pos.x, y: primary.frame.maxY - pos.y)
+        // Probe one point inside the screen rect to avoid boundary
+        // issues with `NSRect.contains` (max edges are exclusive).
+        let probe = CGPoint(x: appKit.x + 1, y: appKit.y - 1)
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(probe) }) else {
+            return nil
+        }
+        let key = NSDeviceDescriptionKey("NSScreenNumber")
+        return screen.deviceDescription[key] as? CGDirectDisplayID
     }
 
     private var enterRect: CGRect { hitRect(margin: 18) }

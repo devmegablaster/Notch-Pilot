@@ -95,8 +95,17 @@ struct NotchContentView: View {
         //     don't rip it out from under them just because the cursor
         //     moved out of the notch hit rect into the panel body)
         //   - The appearance picker overlay is open
-        // Hide in fullscreen if the user opted in.
-        !(prefs.hideInFullscreen && mouseMonitor.isFullscreen)
+        // Hide in fullscreen only when the fullscreen app is on the
+        // SAME screen as the notch — otherwise a fullscreen window on
+        // an external monitor would silently kill the notch on the
+        // MacBook screen, which isn't what the setting promises.
+        let notchScreenID = NotchWindow.displayID(
+            of: NotchWindow.resolveScreen(savedID: prefs.notchScreenID)
+        )
+        let fullscreenOnNotchScreen =
+            mouseMonitor.fullscreenScreenID != nil
+            && mouseMonitor.fullscreenScreenID == notchScreenID
+        return !(prefs.hideInFullscreen && fullscreenOnNotchScreen)
         && (prefs.alwaysVisible
             || displayedVisible
             || mouseMonitor.isHoveringNotch
@@ -125,7 +134,7 @@ struct NotchContentView: View {
         if isSpeaking {
             return CGSize(width: speechPillWidth, height: speechPillHeight)
         }
-        let h = showPermissionAlert ? notchHeight + 10 : notchHeight
+        let h = showPermissionAlert ? pillHeight + 10 : pillHeight
         return CGSize(width: collapsedWidth, height: h)
     }
 
@@ -250,25 +259,73 @@ struct NotchContentView: View {
     /// (square top corners, transparent middle for the hardware notch).
     /// Anywhere else — non-center zones, or non-notched screens — the
     /// pill renders as a fully rounded floating chip with no middle gap.
+    /// Uses the same stable screen resolver as NotchWindow so the value
+    /// doesn't flip when the user moves keyboard focus to a different
+    /// display.
     private var useNotchSilhouette: Bool {
         guard prefs.notchPosition == .topCenter else { return false }
-        guard let primary = NSScreen.main, primary.safeAreaInsets.top > 0 else { return false }
-        if let saved = prefs.notchScreenID,
-           let primaryID = NotchWindow.displayID(of: primary),
-           saved != primaryID {
-            return false
-        }
-        return true
+        let screen = NotchWindow.resolveScreen(savedID: prefs.notchScreenID)
+        return screen.safeAreaInsets.top > 0
     }
 
-    /// Fixed gap between face and status when the pill is floating —
-    /// keeps the chip from feeling cramped when there's no hardware
-    /// notch occupying the middle.
+    /// Fixed gap between face and status when the pill is floating
+    /// and the center slot is empty — keeps the chip from feeling
+    /// cramped when there's no hardware notch occupying the middle.
     private static let floatingMiddleGap: CGFloat = 60
 
+    /// Width an empty edge slot (left or right) takes up. Small but
+    /// non-zero so the pill keeps a sensible shape even when the user
+    /// only has one slot filled.
+    private static let emptyEdgeSlotWidth: CGFloat = 30
+
+    /// Width of the buddy and usage slots — both are roughly icon-sized.
+    private static let buddySlotWidth: CGFloat = 56
+    private static let usageSlotWidth: CGFloat = 84
+
+    /// Pill height for floating mode. Sits roughly within the standard
+    /// macOS menu bar (24 pt) — large enough to read at a glance,
+    /// small enough not to bleed far into the user's app windows on
+    /// screens without a hardware notch.
+    private static let floatingPillHeight: CGFloat = 26
+
+    /// The actual height the pill renders at — `notchHeight` (the
+    /// hardware notch's safe-area inset, typically 32–44 pt) on a
+    /// notched primary, the smaller `floatingPillHeight` everywhere
+    /// else.
+    private var pillHeight: CGFloat {
+        useNotchSilhouette ? notchHeight : Self.floatingPillHeight
+    }
+
+    /// Where in the pill a slot lives. Drives both per-position
+    /// alignment of items and per-position widths for empty slots.
+    enum SlotPosition { case left, center, right }
+
+    /// In silhouette mode the center slot is occupied by the hardware
+    /// notch — whatever the user configured for the center is ignored
+    /// there. Everywhere else the configured value is used.
+    private var effectiveCenterItem: NotchSlotItem {
+        useNotchSilhouette ? .empty : prefs.notchCenterSlot
+    }
+
+    private func slotWidth(_ item: NotchSlotItem, position: SlotPosition) -> CGFloat {
+        switch item {
+        case .buddy: return Self.buddySlotWidth
+        case .status: return rightSectionWidth
+        case .usage: return Self.usageSlotWidth
+        case .empty:
+            switch position {
+            case .left, .right:
+                return Self.emptyEdgeSlotWidth
+            case .center:
+                return useNotchSilhouette ? notchWidth : Self.floatingMiddleGap
+            }
+        }
+    }
+
     private var collapsedWidth: CGFloat {
-        let middle = useNotchSilhouette ? notchWidth : Self.floatingMiddleGap
-        return leftSectionWidth + middle + rightSectionWidth
+        slotWidth(prefs.notchLeftSlot, position: .left)
+        + slotWidth(effectiveCenterItem, position: .center)
+        + slotWidth(prefs.notchRightSlot, position: .right)
     }
 
     /// Anchor point for the collapsed pill's open/close scale transition,
@@ -278,7 +335,9 @@ struct NotchContentView: View {
     /// pill scales from its own center.
     private var collapsedNotchAnchor: UnitPoint {
         guard useNotchSilhouette else { return UnitPoint(x: 0.5, y: 0) }
-        let notchCenterX = leftSectionWidth + notchWidth / 2
+        let leftWidth = slotWidth(prefs.notchLeftSlot, position: .left)
+        let centerWidth = slotWidth(effectiveCenterItem, position: .center)
+        let notchCenterX = leftWidth + centerWidth / 2
         let x = collapsedWidth > 0 ? notchCenterX / collapsedWidth : 0.5
         return UnitPoint(x: x, y: 0)
     }
@@ -627,66 +686,154 @@ struct NotchContentView: View {
 
     // MARK: - Collapsed pill
 
+    /// Renders a single slot of the collapsed pill. Each item picks its
+    /// own width via `slotWidth(_:position:)`, and the slot's frame is
+    /// aligned by position so e.g. a `.buddy` in the left slot still
+    /// sits next to the hardware notch the way it always has.
+    @ViewBuilder
+    private func slotContent(
+        _ item: NotchSlotItem,
+        position: SlotPosition
+    ) -> some View {
+        let w = slotWidth(item, position: position)
+        switch item {
+        case .empty:
+            Color.clear.frame(width: w, height: pillHeight)
+        case .buddy:
+            buddySlotView(position: position).frame(width: w, height: pillHeight)
+        case .status:
+            statusSlotView(position: position).frame(width: w, height: pillHeight)
+        case .usage:
+            usageSlotView(position: position).frame(width: w, height: pillHeight)
+        }
+    }
+
+    /// Buddy face. Hugs the inner edge of the slot (the side closest
+    /// to the center) so it sits flush against the hardware notch in
+    /// silhouette mode, matching the original visual. Centered when in
+    /// the center slot.
+    private func buddySlotView(position: SlotPosition) -> some View {
+        HStack(spacing: 0) {
+            // Left or center slot needs leading whitespace pushed to
+            // shove the face rightward (toward the notch / center).
+            if position != .right { Spacer(minLength: 0) }
+            BuddyFace(
+                mode: mode,
+                size: 9,
+                colorOverride: showPermissionAlert ? permissionAlertColor : nil
+            )
+            .animation(.easeInOut(duration: 0.5), value: showPermissionAlert)
+            .padding(.leading, position == .right ? 16 : 0)
+            .padding(.trailing, position == .left ? 16 : 0)
+            // Right or center slot needs trailing whitespace.
+            if position != .left { Spacer(minLength: 0) }
+        }
+    }
+
+    /// Session-status text ("1 session", "zzz…", or the pulsing
+    /// "permission" alert variant). Always left-aligned within its
+    /// slot — that mirrors how the right-slot version has always
+    /// rendered.
+    @ViewBuilder
+    private func statusSlotView(position: SlotPosition) -> some View {
+        HStack(spacing: 0) {
+            if showPermissionAlert {
+                TimelineView(.periodic(from: .now, by: 0.05)) { timeline in
+                    let t = timeline.date.timeIntervalSinceReferenceDate
+                    let opacity = 0.65 + 0.35 * sin(t * 2.5)
+                    Text(currentStatus)
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundColor(permissionAlertColor.base.opacity(opacity))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                .padding(.leading, rightPillHorizontalPadding)
+            } else {
+                Text(currentStatus)
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundColor(
+                        isIdleStatus
+                            ? .white.opacity(0.35)
+                            : .white.opacity(0.92)
+                    )
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .padding(.leading, rightPillHorizontalPadding)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// Compact usage capsule — same visual language as the larger
+    /// `usagePill` shown in the header (capsule background, progress
+    /// fill, color-coded tint, window indicator), just sized to fit a
+    /// notch slot. The window (5-hour vs weekly) is user-selectable.
+    private func usageSlotView(position: SlotPosition) -> some View {
+        let window: ClaudeUsage.Window? = {
+            guard let live = usage.live else { return nil }
+            switch prefs.usageSlotWindow {
+            case .fiveHour: return live.fiveHour
+            case .weekly:   return live.sevenDay
+            }
+        }()
+        let utilization = window?.utilization
+        let pct: Int? = utilization.map { Int($0.rounded()) }
+        let tint: Color = utilization.map { usageTint(percent: $0) } ?? .white.opacity(0.4)
+        let capsuleWidth: CGFloat = 64
+        let capsuleHeight: CGFloat = 16
+        let windowLabel = prefs.usageSlotWindow.shortLabel
+
+        return HStack(spacing: 0) {
+            Spacer(minLength: 0)
+            ZStack(alignment: .leading) {
+                Capsule(style: .continuous)
+                    .fill(Color.white.opacity(0.08))
+                if let util = utilization {
+                    GeometryReader { geo in
+                        Rectangle()
+                            .fill(tint.opacity(0.32))
+                            .frame(width: geo.size.width * min(util / 100, 1.0))
+                    }
+                    .clipShape(Capsule(style: .continuous))
+                }
+                HStack(spacing: 3) {
+                    Spacer(minLength: 0)
+                    if let pct = pct {
+                        Text("\(pct)%")
+                            .font(.system(size: 9, weight: .semibold, design: .rounded))
+                            .foregroundColor(.white.opacity(0.92))
+                            .monospacedDigit()
+                    } else {
+                        Text("—")
+                            .font(.system(size: 9, weight: .medium, design: .rounded))
+                            .foregroundColor(.white.opacity(0.5))
+                    }
+                    // Window indicator — same `· 5h` / `· wk` pattern
+                    // the expanded panel's usage pill uses.
+                    Text("· \(windowLabel)")
+                        .font(.system(size: 8, weight: .medium, design: .rounded))
+                        .foregroundColor(.white.opacity(0.5))
+                    Spacer(minLength: 0)
+                }
+            }
+            .frame(width: capsuleWidth, height: capsuleHeight)
+            .overlay(
+                Capsule(style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.10), lineWidth: 0.5)
+            )
+            Spacer(minLength: 0)
+        }
+    }
+
     private var collapsedPill: some View {
         let shape = surfaceShape(bottomCornerRadius: notchHeight * 0.55)
 
         return HStack(spacing: 0) {
-            // Left section: eyes anchored to the right edge (next to notch)
-            HStack(spacing: 0) {
-                Spacer(minLength: 0)
-                BuddyFace(
-                    mode: mode,
-                    size: 9,
-                    colorOverride: showPermissionAlert ? permissionAlertColor : nil
-                )
-                .animation(.easeInOut(duration: 0.5), value: showPermissionAlert)
-                .padding(.trailing, 16)
-            }
-            .frame(width: leftSectionWidth, height: notchHeight)
-
-            // Middle gap. Sized to the hardware notch in silhouette
-            // mode (so the cutout stays clear), and to a smaller fixed
-            // gap in floating mode so the chip stays comfortably wide.
-            Color.clear
-                .frame(
-                    width: useNotchSilhouette ? notchWidth : Self.floatingMiddleGap,
-                    height: notchHeight
-                )
-
-            // Right section: status text anchored to the left edge.
-            // Dim to a subdued grey when the notch is idle ("zzz…")
-            // so it doesn't scream for attention; bright white while
-            // there's actual activity.
-            HStack(spacing: 0) {
-                if showPermissionAlert {
-                    // Pulsing "permission" text
-                    TimelineView(.periodic(from: .now, by: 0.05)) { timeline in
-                        let t = timeline.date.timeIntervalSinceReferenceDate
-                        let opacity = 0.65 + 0.35 * sin(t * 2.5) // 0.3–1.0
-                        Text(currentStatus)
-                            .font(.system(size: 11, weight: .semibold, design: .rounded))
-                            .foregroundColor(permissionAlertColor.base.opacity(opacity))
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                    }
-                    .padding(.leading, rightPillHorizontalPadding)
-                } else {
-                    Text(currentStatus)
-                        .font(.system(size: 11, weight: .medium, design: .rounded))
-                        .foregroundColor(
-                            isIdleStatus
-                                ? .white.opacity(0.35)
-                                : .white.opacity(0.92)
-                        )
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .padding(.leading, rightPillHorizontalPadding)
-                }
-                Spacer(minLength: 0)
-            }
-            .frame(width: rightSectionWidth, height: notchHeight)
+            slotContent(prefs.notchLeftSlot, position: .left)
+            slotContent(effectiveCenterItem, position: .center)
+            slotContent(prefs.notchRightSlot, position: .right)
         }
-        .frame(width: collapsedWidth, height: notchHeight, alignment: .topLeading)
+        .frame(width: collapsedWidth, height: pillHeight, alignment: .topLeading)
         .background(
             ZStack {
                 shape.fill(Color.black)
@@ -2811,7 +2958,151 @@ struct NotchContentView: View {
             )
 
             positionRow
+            slotsSection
         }
+    }
+
+    /// Three rows of inline chip buttons — left, center, right — letting
+    /// the user pick what each notch slot shows. Chips read like the
+    /// rest of the app's controls (no system-blue Menu styling) and
+    /// dim cleanly when the row is disabled.
+    private var slotsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Image(systemName: "rectangle.split.3x1")
+                    .font(.system(size: 12))
+                    .foregroundColor(.white.opacity(0.4))
+                    .frame(width: 16)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Notch slots")
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .foregroundColor(.white.opacity(0.9))
+                    Text(useNotchSilhouette
+                         ? "Pick what each slot shows · the center sits behind the hardware notch"
+                         : "Pick what each slot shows · all three are visible in floating mode")
+                        .font(.system(size: 10, design: .rounded))
+                        .foregroundColor(.white.opacity(0.45))
+                }
+
+                Spacer()
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                slotRow(label: "Left",   binding: $prefs.notchLeftSlot,   dimmed: false)
+                slotRow(label: "Center", binding: $prefs.notchCenterSlot, dimmed: useNotchSilhouette)
+                slotRow(label: "Right",  binding: $prefs.notchRightSlot,  dimmed: false)
+            }
+            .padding(.leading, 26)
+
+            if anySlotUsesUsage {
+                usageWindowRow
+                    .padding(.leading, 26)
+            }
+        }
+    }
+
+    /// True when any of the three slots is showing the usage capsule —
+    /// gates the visibility of the 5h-vs-weekly toggle so the row
+    /// doesn't show up when it would do nothing.
+    private var anySlotUsesUsage: Bool {
+        prefs.notchLeftSlot == .usage
+        || prefs.notchCenterSlot == .usage
+        || prefs.notchRightSlot == .usage
+    }
+
+    private var usageWindowRow: some View {
+        HStack(spacing: 6) {
+            Text("Usage window")
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .tracking(0.3)
+                .foregroundColor(.white.opacity(0.55))
+                .fixedSize()
+            ForEach(UsageSlotWindow.allCases) { win in
+                Button {
+                    prefs.usageSlotWindow = win
+                } label: {
+                    Text(win.label)
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .foregroundColor(prefs.usageSlotWindow == win ? .white : .white.opacity(0.6))
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 5)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(
+                                    prefs.usageSlotWindow == win
+                                        ? accent.opacity(0.45)
+                                        : Color.white.opacity(0.05)
+                                )
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .strokeBorder(
+                                    prefs.usageSlotWindow == win
+                                        ? accent.opacity(0.55)
+                                        : Color.white.opacity(0.08),
+                                    lineWidth: 1
+                                )
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    @ViewBuilder
+    private func slotRow(
+        label: String,
+        binding: Binding<NotchSlotItem>,
+        dimmed: Bool
+    ) -> some View {
+        HStack(spacing: 6) {
+            Text(label)
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .tracking(0.3)
+                .foregroundColor(.white.opacity(dimmed ? 0.25 : 0.55))
+                .frame(width: 50, alignment: .leading)
+            ForEach(NotchSlotItem.allCases) { item in
+                slotChip(
+                    item: item,
+                    isOn: binding.wrappedValue == item,
+                    dimmed: dimmed
+                ) {
+                    binding.wrappedValue = item
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .opacity(dimmed ? 0.45 : 1.0)
+    }
+
+    private func slotChip(
+        item: NotchSlotItem,
+        isOn: Bool,
+        dimmed: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(item.label)
+                .font(.system(size: 10, weight: .medium, design: .rounded))
+                .foregroundColor(isOn ? .white : .white.opacity(0.6))
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(isOn ? accent.opacity(0.45) : Color.white.opacity(0.05))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .strokeBorder(
+                            isOn ? accent.opacity(0.55) : Color.white.opacity(0.08),
+                            lineWidth: 1
+                        )
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(dimmed)
     }
 
     /// Settings entry for the draggable notch. The notch is moved by
