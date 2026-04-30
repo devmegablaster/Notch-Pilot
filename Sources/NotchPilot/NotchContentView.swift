@@ -123,10 +123,18 @@ struct NotchContentView: View {
 
     private var collapsedSize: CGSize {
         if isSpeaking {
-            return CGSize(width: collapsedWidth, height: speechPillHeight)
+            return CGSize(width: speechPillWidth, height: speechPillHeight)
         }
         let h = showPermissionAlert ? notchHeight + 10 : notchHeight
         return CGSize(width: collapsedWidth, height: h)
+    }
+
+    /// The speech pop-out always reserves a buddy-sized middle section
+    /// (the buddy face animates inside it), so its width has to include
+    /// `notchWidth` regardless of whether we're in silhouette or pill
+    /// mode. Otherwise SwiftUI compresses the HStack children.
+    private var speechPillWidth: CGFloat {
+        leftSectionWidth + notchWidth + rightSectionWidth
     }
 
     @State private var permissionSuppressed = false
@@ -238,18 +246,56 @@ struct NotchContentView: View {
         return min(max(total, rightPillMinWidth), rightPillMaxWidth)
     }
 
+    /// True only when the pill should mimic the notch silhouette
+    /// (square top corners, transparent middle for the hardware notch).
+    /// Anywhere else — non-center zones, or non-notched screens — the
+    /// pill renders as a fully rounded floating chip with no middle gap.
+    private var useNotchSilhouette: Bool {
+        guard prefs.notchPosition == .topCenter else { return false }
+        guard let primary = NSScreen.main, primary.safeAreaInsets.top > 0 else { return false }
+        if let saved = prefs.notchScreenID,
+           let primaryID = NotchWindow.displayID(of: primary),
+           saved != primaryID {
+            return false
+        }
+        return true
+    }
+
+    /// Fixed gap between face and status when the pill is floating —
+    /// keeps the chip from feeling cramped when there's no hardware
+    /// notch occupying the middle.
+    private static let floatingMiddleGap: CGFloat = 60
+
     private var collapsedWidth: CGFloat {
-        leftSectionWidth + notchWidth + rightSectionWidth
+        let middle = useNotchSilhouette ? notchWidth : Self.floatingMiddleGap
+        return leftSectionWidth + middle + rightSectionWidth
     }
 
     /// Anchor point for the collapsed pill's open/close scale transition,
-    /// expressed in the pill's own unit coordinate space. Points at the
-    /// top edge of the pill right where the physical notch lives, so the
-    /// pill looks like it's emerging from / retracting into the notch.
+    /// expressed in the pill's own unit coordinate space. In silhouette
+    /// mode this points at the hardware-notch center so the pill looks
+    /// like it's emerging from the notch. In floating-pill mode the
+    /// pill scales from its own center.
     private var collapsedNotchAnchor: UnitPoint {
+        guard useNotchSilhouette else { return UnitPoint(x: 0.5, y: 0) }
         let notchCenterX = leftSectionWidth + notchWidth / 2
         let x = collapsedWidth > 0 ? notchCenterX / collapsedWidth : 0.5
         return UnitPoint(x: x, y: 0)
+    }
+
+    /// Shape used for the collapsed pill, speech pop-out, and expanded
+    /// panels. Square top corners on the notched primary in topCenter
+    /// (so the surface flows out of the hardware notch); fully rounded
+    /// otherwise.
+    private func surfaceShape(bottomCornerRadius r: CGFloat) -> UnevenRoundedRectangle {
+        let top: CGFloat = useNotchSilhouette ? 0 : r
+        return UnevenRoundedRectangle(
+            topLeadingRadius: top,
+            bottomLeadingRadius: r,
+            bottomTrailingRadius: r,
+            topTrailingRadius: top,
+            style: .continuous
+        )
     }
 
     /// Anchor for the expanded panel's open/close scale transition.
@@ -517,16 +563,10 @@ struct NotchContentView: View {
     /// grows. The buddy moves from its usual left-of-notch spot to
     /// the center of the notch, and a title + subtitle drop in below.
     private func speechPill(_ speech: BuddySpeech) -> some View {
-        let w = collapsedWidth
+        let w = speechPillWidth
         let h = speechPillHeight
         let cornerRadius = notchHeight * 0.55
-        let shape = UnevenRoundedRectangle(
-            topLeadingRadius: 0,
-            bottomLeadingRadius: cornerRadius,
-            bottomTrailingRadius: cornerRadius,
-            topTrailingRadius: 0,
-            style: .continuous
-        )
+        let shape = surfaceShape(bottomCornerRadius: cornerRadius)
         let tint: Color = {
             switch speech.tint {
             case .accent:  return accent
@@ -588,13 +628,7 @@ struct NotchContentView: View {
     // MARK: - Collapsed pill
 
     private var collapsedPill: some View {
-        let shape = UnevenRoundedRectangle(
-            topLeadingRadius: 0,
-            bottomLeadingRadius: notchHeight * 0.55,
-            bottomTrailingRadius: notchHeight * 0.55,
-            topTrailingRadius: 0,
-            style: .continuous
-        )
+        let shape = surfaceShape(bottomCornerRadius: notchHeight * 0.55)
 
         return HStack(spacing: 0) {
             // Left section: eyes anchored to the right edge (next to notch)
@@ -610,9 +644,14 @@ struct NotchContentView: View {
             }
             .frame(width: leftSectionWidth, height: notchHeight)
 
-            // Middle: empty space where the physical notch lives
+            // Middle gap. Sized to the hardware notch in silhouette
+            // mode (so the cutout stays clear), and to a smaller fixed
+            // gap in floating mode so the chip stays comfortably wide.
             Color.clear
-                .frame(width: notchWidth, height: notchHeight)
+                .frame(
+                    width: useNotchSilhouette ? notchWidth : Self.floatingMiddleGap,
+                    height: notchHeight
+                )
 
             // Right section: status text anchored to the left edge.
             // Dim to a subdued grey when the notch is idle ("zzz…")
@@ -676,13 +715,7 @@ struct NotchContentView: View {
     // MARK: - Expanded panel
 
     private var expandedPanel: some View {
-        let shape = UnevenRoundedRectangle(
-            topLeadingRadius: 0,
-            bottomLeadingRadius: 28,
-            bottomTrailingRadius: 28,
-            topTrailingRadius: 0,
-            style: .continuous
-        )
+        let shape = surfaceShape(bottomCornerRadius: 28)
 
         return VStack(alignment: .leading, spacing: 0) {
             header
@@ -1926,13 +1959,7 @@ struct NotchContentView: View {
     }
 
     private func permissionPanel(_ permission: PendingPermission) -> some View {
-        let shape = UnevenRoundedRectangle(
-            topLeadingRadius: 0,
-            bottomLeadingRadius: 28,
-            bottomTrailingRadius: 28,
-            topTrailingRadius: 0,
-            style: .continuous
-        )
+        let shape = surfaceShape(bottomCornerRadius: 28)
 
         let isQuestion = permission.isAskUserQuestion && !permission.askOptions.isEmpty
 
@@ -2319,7 +2346,7 @@ struct NotchContentView: View {
                 Spacer()
             }
             Button {
-                if let url = URL(string: "https://claude.ai/settings/billing") {
+                if let url = URL(string: "https://claude.ai/settings/usage") {
                     NSWorkspace.shared.open(url)
                 }
             } label: {
@@ -2782,6 +2809,48 @@ struct NotchContentView: View {
                 subtitle: "Hide the notch when any app is in fullscreen mode",
                 isOn: $prefs.hideInFullscreen
             )
+
+            positionRow
+        }
+    }
+
+    /// Settings entry for the draggable notch. The notch is moved by
+    /// dragging it; this row just shows where it is and offers a one-tap
+    /// reset to the original top-center / primary-screen position.
+    private var positionRow: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                .font(.system(size: 12))
+                .foregroundColor(.white.opacity(0.4))
+                .frame(width: 16)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Notch position")
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundColor(.white.opacity(0.9))
+                Text("Drag the notch to any top corner · currently \(prefs.notchPosition.label.lowercased())")
+                    .font(.system(size: 10, design: .rounded))
+                    .foregroundColor(.white.opacity(0.45))
+            }
+
+            Spacer()
+
+            Button {
+                prefs.notchPosition = .topCenter
+                prefs.notchScreenID = nil
+            } label: {
+                Text("Reset")
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .foregroundColor(.white.opacity(0.85))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(Color.white.opacity(0.08))
+                    )
+            }
+            .buttonStyle(.plain)
+            .disabled(prefs.notchPosition == .topCenter && prefs.notchScreenID == nil)
         }
     }
 

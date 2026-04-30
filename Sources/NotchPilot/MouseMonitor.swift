@@ -94,16 +94,33 @@ final class MouseMonitor: ObservableObject {
     private var enterRect: CGRect { hitRect(margin: 18) }
     private var exitRect: CGRect { hitRect(margin: 60) }
 
+    /// Returns the current pill rect in screen coordinates. Set by the
+    /// NotchWindow once it's built so the hover area follows whatever
+    /// snap zone the user has dragged the notch to. Falls back to a
+    /// primary-screen-top-center default when nil (used briefly at
+    /// startup before the window registers itself).
+    var anchorRectProvider: (() -> CGRect)?
+
     /// Screen-coordinate rect covering the notch area plus a margin
     /// so the hover isn't fussy to trigger.
     private func hitRect(margin: CGFloat) -> CGRect {
+        let base = anchorRectProvider?() ?? defaultAnchorRect()
+        return CGRect(
+            x: base.minX - margin,
+            y: base.minY - margin,
+            width: base.width + margin * 2,
+            height: base.height + margin
+        )
+    }
+
+    private func defaultAnchorRect() -> CGRect {
         guard let screen = NSScreen.main else { return .zero }
         let frame = screen.frame
         return CGRect(
-            x: frame.midX - notchWidth / 2 - margin,
-            y: frame.maxY - notchHeight - margin,
-            width: notchWidth + margin * 2,
-            height: notchHeight + margin
+            x: frame.midX - notchWidth / 2,
+            y: frame.maxY - notchHeight,
+            width: notchWidth,
+            height: notchHeight
         )
     }
 }

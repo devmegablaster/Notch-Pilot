@@ -1,5 +1,45 @@
 import SwiftUI
 import ServiceManagement
+import CoreGraphics
+
+/// Where the notch overlay lives on its host screen. `topCenter` on the
+/// primary notched display is the original behavior — sits in the
+/// hardware notch. The other zones float as a rounded pill flush with
+/// the top edge. Five zones evenly distribute the pill across the top
+/// of the screen so users on wide displays can land it where it doesn't
+/// fight whatever they happen to have in the menu bar.
+enum NotchPosition: String, CaseIterable, Identifiable {
+    case topLeft
+    case topMidLeft
+    case topCenter
+    case topMidRight
+    case topRight
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .topLeft:     return "Top left"
+        case .topMidLeft:  return "Top mid-left"
+        case .topCenter:   return "Top center"
+        case .topMidRight: return "Top mid-right"
+        case .topRight:    return "Top right"
+        }
+    }
+
+    /// Where the pill's center should sit, expressed as a fraction of
+    /// the host screen's width. 0 = left edge, 1 = right edge. Used by
+    /// the frame helpers so adding a new zone is just one entry here.
+    var horizontalAnchor: CGFloat {
+        switch self {
+        case .topLeft:     return 0.0
+        case .topMidLeft:  return 0.25
+        case .topCenter:   return 0.5
+        case .topMidRight: return 0.75
+        case .topRight:    return 1.0
+        }
+    }
+}
 
 /// Categories of events the buddy can announce out loud. Each has its own
 /// toggle in preferences so the user can enable just the noise they want.
@@ -196,6 +236,28 @@ final class BuddyPreferences: ObservableObject {
         voiceEvents = copy
     }
 
+    /// Snap zone the notch lives in on its host screen. Updated by the
+    /// drag-to-move interaction in NotchWindow and by the "Reset
+    /// position" settings button.
+    @Published var notchPosition: NotchPosition {
+        didSet {
+            UserDefaults.standard.set(notchPosition.rawValue, forKey: Self.notchPositionKey)
+        }
+    }
+
+    /// Display the notch is currently shown on. `nil` means "follow the
+    /// system primary screen." Persisted as an Int because UserDefaults
+    /// has no native UInt32 setter; widened for safety.
+    @Published var notchScreenID: CGDirectDisplayID? {
+        didSet {
+            if let id = notchScreenID {
+                UserDefaults.standard.set(Int(id), forKey: Self.notchScreenIDKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: Self.notchScreenIDKey)
+            }
+        }
+    }
+
     private static let styleKey = "notchpilot.style"
     private static let colorKey = "notchpilot.color"
     private static let voiceKey = "notchpilot.voice"
@@ -207,6 +269,8 @@ final class BuddyPreferences: ObservableObject {
     private static let speechEventsKey = "notchpilot.speech.events"
     private static let suppressPermKey = "notchpilot.suppressPermissionWhenFocused"
     private static let hideFullscreenKey = "notchpilot.hideInFullscreen"
+    private static let notchPositionKey = "notchpilot.notchPosition"
+    private static let notchScreenIDKey = "notchpilot.notchScreenID"
 
     init() {
         let defaults = UserDefaults.standard
@@ -222,6 +286,14 @@ final class BuddyPreferences: ObservableObject {
         speechEnabled = defaults.object(forKey: Self.speechKey) as? Bool ?? true
         suppressPermissionWhenFocused = defaults.object(forKey: Self.suppressPermKey) as? Bool ?? false
         hideInFullscreen = defaults.object(forKey: Self.hideFullscreenKey) as? Bool ?? true
+
+        let storedPosition = defaults.string(forKey: Self.notchPositionKey) ?? ""
+        notchPosition = NotchPosition(rawValue: storedPosition) ?? .topCenter
+        if let storedScreen = defaults.object(forKey: Self.notchScreenIDKey) as? Int {
+            notchScreenID = CGDirectDisplayID(storedScreen)
+        } else {
+            notchScreenID = nil
+        }
 
         let storedSpeechEvents = (defaults.object(forKey: Self.speechEventsKey) as? [String: Bool]) ?? [:]
         var se: [SpeechEvent: Bool] = [:]
