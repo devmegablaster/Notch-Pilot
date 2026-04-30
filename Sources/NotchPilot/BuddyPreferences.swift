@@ -53,35 +53,33 @@ enum NotchSlotItem: String, CaseIterable, Identifiable {
     }
 }
 
-/// Where the notch overlay lives on its host screen. `topCenter` on the
-/// primary notched display is the original behavior — sits in the
-/// hardware notch. The other zones float as a rounded pill flush with
-/// the top edge. Five zones evenly distribute the pill across the top
-/// of the screen so users on wide displays can land it where it doesn't
-/// fight whatever they happen to have in the menu bar.
-enum NotchPosition: String, CaseIterable, Identifiable {
-    case topLeft
-    case topMidLeft
-    case topCenter
-    case topMidRight
-    case topRight
+/// Magnetic snap anchors used while dragging. The pill snaps to one of
+/// these when the user releases close enough; otherwise the drop
+/// location is honored verbatim (free positioning).
+enum NotchSnapAnchor: CaseIterable {
+    case left
+    case center
+    case right
 
-    var id: String { rawValue }
-
-    var label: String {
+    /// Position fraction along the placeable horizontal range
+    /// (0 = pill flush with left edge + padding, 1 = pill flush with
+    /// right edge - padding, 0.5 = centered).
+    var fraction: CGFloat {
         switch self {
-        case .topLeft:     return "Top left"
-        case .topMidLeft:  return "Top mid-left"
-        case .topCenter:   return "Top center"
-        case .topMidRight: return "Top mid-right"
-        case .topRight:    return "Top right"
+        case .left:   return 0.0
+        case .center: return 0.5
+        case .right:  return 1.0
         }
     }
+}
 
-    /// Where the pill's center should sit, expressed as a fraction of
-    /// the host screen's width. 0 = left edge, 1 = right edge. Used by
-    /// the frame helpers so adding a new zone is just one entry here.
-    var horizontalAnchor: CGFloat {
+/// Legacy storage shape from v0.4.x. Kept only so we can migrate old
+/// `UserDefaults` values into the new fractional anchor on first
+/// launch — not used at runtime anywhere else.
+private enum LegacyNotchPosition: String {
+    case topLeft, topMidLeft, topCenter, topMidRight, topRight
+
+    var fraction: CGFloat {
         switch self {
         case .topLeft:     return 0.0
         case .topMidLeft:  return 0.25
@@ -287,12 +285,39 @@ final class BuddyPreferences: ObservableObject {
         voiceEvents = copy
     }
 
-    /// Snap zone the notch lives in on its host screen. Updated by the
-    /// drag-to-move interaction in NotchWindow and by the "Reset
-    /// position" settings button.
-    @Published var notchPosition: NotchPosition {
+    /// Where the pill sits on its host screen, expressed as a fraction
+    /// from 0 (flush left) to 1 (flush right) of the placeable
+    /// horizontal range. Updated by the drag-to-move interaction in
+    /// NotchWindow (with magnetic snap to 0.0 / 0.5 / 1.0) and by the
+    /// "Reset position" settings button.
+    @Published var notchAnchorFraction: CGFloat {
         didSet {
-            UserDefaults.standard.set(notchPosition.rawValue, forKey: Self.notchPositionKey)
+            UserDefaults.standard.set(
+                Double(notchAnchorFraction),
+                forKey: Self.notchAnchorFractionKey
+            )
+        }
+    }
+
+    /// When true (default) the pill is constrained to the top edge of
+    /// the screen — the original notch behavior. When false, drag-and-
+    /// drop is fully 2D: the pill rests wherever the user drops it,
+    /// using `notchAnchorYFromTop`. Magnetic snap to the three top-edge
+    /// anchors only fires while this is on.
+    @Published var pinToTopEdge: Bool {
+        didSet {
+            UserDefaults.standard.set(pinToTopEdge, forKey: Self.pinToTopEdgeKey)
+        }
+    }
+
+    /// Distance, in points, from the top of the host screen to the
+    /// pill's top edge. Only consulted when `pinToTopEdge` is false.
+    @Published var notchAnchorYFromTop: CGFloat {
+        didSet {
+            UserDefaults.standard.set(
+                Double(notchAnchorYFromTop),
+                forKey: Self.notchAnchorYFromTopKey
+            )
         }
     }
 
@@ -353,7 +378,10 @@ final class BuddyPreferences: ObservableObject {
     private static let speechEventsKey = "notchpilot.speech.events"
     private static let suppressPermKey = "notchpilot.suppressPermissionWhenFocused"
     private static let hideFullscreenKey = "notchpilot.hideInFullscreen"
-    private static let notchPositionKey = "notchpilot.notchPosition"
+    private static let notchPositionKey = "notchpilot.notchPosition"  // legacy
+    private static let notchAnchorFractionKey = "notchpilot.notchAnchorFraction"
+    private static let notchAnchorYFromTopKey = "notchpilot.notchAnchorYFromTop"
+    private static let pinToTopEdgeKey = "notchpilot.pinToTopEdge"
     private static let notchScreenIDKey = "notchpilot.notchScreenID"
     private static let notchLeftSlotKey = "notchpilot.notchLeftSlot"
     private static let notchCenterSlotKey = "notchpilot.notchCenterSlot"
@@ -375,8 +403,21 @@ final class BuddyPreferences: ObservableObject {
         suppressPermissionWhenFocused = defaults.object(forKey: Self.suppressPermKey) as? Bool ?? false
         hideInFullscreen = defaults.object(forKey: Self.hideFullscreenKey) as? Bool ?? true
 
-        let storedPosition = defaults.string(forKey: Self.notchPositionKey) ?? ""
-        notchPosition = NotchPosition(rawValue: storedPosition) ?? .topCenter
+        if let storedFraction = defaults.object(forKey: Self.notchAnchorFractionKey) as? Double {
+            notchAnchorFraction = CGFloat(storedFraction)
+        } else if let legacyRaw = defaults.string(forKey: Self.notchPositionKey),
+                  let legacy = LegacyNotchPosition(rawValue: legacyRaw) {
+            // First launch on the new fractional model — promote the
+            // old enum value and drop the obsolete key.
+            notchAnchorFraction = legacy.fraction
+            defaults.removeObject(forKey: Self.notchPositionKey)
+        } else {
+            notchAnchorFraction = 0.5
+        }
+        pinToTopEdge = defaults.object(forKey: Self.pinToTopEdgeKey) as? Bool ?? true
+        notchAnchorYFromTop = CGFloat(
+            (defaults.object(forKey: Self.notchAnchorYFromTopKey) as? Double) ?? 0
+        )
         if let storedScreen = defaults.object(forKey: Self.notchScreenIDKey) as? Int {
             notchScreenID = CGDirectDisplayID(storedScreen)
         } else {

@@ -48,6 +48,11 @@ final class NotchWindow: NSPanel {
     private static let dragThreshold: CGFloat = 5
 
     private var prefsCancellables: Set<AnyCancellable> = []
+    /// Set to true while we're applying multiple prefs writes
+    /// atomically (e.g. during a drag release). The Combine observers
+    /// skip while this is on so we don't trigger one animation per
+    /// pref change — we run a single reposition at the end instead.
+    private var suppressPrefsReposition = false
 
     /// Hit-test wrapper around the SwiftUI hosting view. Lets clicks in
     /// transparent regions of the window (outside the visible pill /
@@ -169,7 +174,15 @@ final class NotchWindow: NSPanel {
 
         // Re-position when the user picks a different zone or the
         // saved screen disappears / reappears.
-        preferences.$notchPosition
+        preferences.$notchAnchorFraction
+            .dropFirst()
+            .sink { [weak self] _ in self?.repositionForCurrentState() }
+            .store(in: &prefsCancellables)
+        preferences.$notchAnchorYFromTop
+            .dropFirst()
+            .sink { [weak self] _ in self?.repositionForCurrentState() }
+            .store(in: &prefsCancellables)
+        preferences.$pinToTopEdge
             .dropFirst()
             .sink { [weak self] _ in self?.repositionForCurrentState() }
             .store(in: &prefsCancellables)
@@ -226,17 +239,17 @@ final class NotchWindow: NSPanel {
         return NSScreen.screens.first ?? NSScreen.main!
     }
 
-    /// `topCenter` keeps the original 560-wide window so the
-    /// expand/collapse animation has horizontal continuity. Every other
-    /// zone uses a tight window matching the pill — the smaller
-    /// footprint also means we don't need any click pass-through trickery
-    /// for those positions.
+    /// Frame for the collapsed pill. When the user is sitting exactly
+    /// on the hardware notch we keep a 560-wide window so the
+    /// silhouette flows seamlessly into the cutout (and the click
+    /// pass-through layer handles the transparent margins). Anywhere
+    /// else the window matches the pill width — smaller footprint, no
+    /// pass-through trickery needed.
     private func collapsedFrame(size: CGSize) -> NSRect {
         let screen = currentScreen
         let f = screen.frame
-        let pos = preferences.notchPosition
         let topGap = topGapForCurrentState(on: screen)
-        if pos == .topCenter {
+        if isHardwareNotchAnchored(on: screen) {
             let w: CGFloat = Self.expandedPanelWidth
             return NSRect(
                 x: f.midX - w / 2,
@@ -245,58 +258,94 @@ final class NotchWindow: NSPanel {
                 height: size.height
             )
         }
-        let x = horizontalOrigin(for: pos, contentWidth: size.width, on: screen)
-        return NSRect(
-            x: x,
-            y: f.maxY - size.height - topGap,
-            width: size.width,
-            height: size.height
+        let x = horizontalOrigin(
+            forFraction: preferences.notchAnchorFraction,
+            contentWidth: size.width,
+            on: screen
         )
+        let y = collapsedY(forContentHeight: size.height, on: screen, topGap: topGap)
+        return NSRect(x: x, y: y, width: size.width, height: size.height)
     }
 
     private func expandedFrame() -> NSRect {
         let screen = currentScreen
         let f = screen.frame
-        let pos = preferences.notchPosition
         let w: CGFloat = Self.expandedPanelWidth
         let h: CGFloat = Self.expandedPanelHeight
         let topGap = topGapForCurrentState(on: screen)
-        let x = horizontalOrigin(for: pos, contentWidth: w, on: screen)
-        return NSRect(x: x, y: f.maxY - h - topGap, width: w, height: h)
+        let x = horizontalOrigin(
+            forFraction: preferences.notchAnchorFraction,
+            contentWidth: w,
+            on: screen
+        )
+        // The expanded panel grows downward from wherever the pill is
+        // sitting. When pinned to the top edge that's just `f.maxY -
+        // h`; when free-positioned, anchor the top of the panel to
+        // where the pill currently is and clamp so the panel can't
+        // walk off the bottom of the screen.
+        let pillY = collapsedY(
+            forContentHeight: lastCollapsedSize.height > 0 ? lastCollapsedSize.height : notchHeight,
+            on: screen,
+            topGap: topGap
+        )
+        let pillTop = pillY + (lastCollapsedSize.height > 0 ? lastCollapsedSize.height : notchHeight)
+        var panelY = pillTop - h
+        panelY = max(f.minY, panelY)
+        return NSRect(x: x, y: panelY, width: w, height: h)
     }
 
-    /// Compute the window's left edge for a given zone. The non-end
-    /// zones center the window on a fraction of screen width, then we
-    /// clamp so neither edge of the window falls off-screen (matters
-    /// for the wide expanded panel on narrow displays).
+    /// Y of the collapsed pill in screen coords (AppKit, bottom-left
+    /// origin). Honors `pinToTopEdge` — when false we use the saved
+    /// `notchAnchorYFromTop` and clamp so the pill stays on screen.
+    private func collapsedY(
+        forContentHeight contentHeight: CGFloat,
+        on screen: NSScreen,
+        topGap: CGFloat
+    ) -> CGFloat {
+        let f = screen.frame
+        if preferences.pinToTopEdge {
+            return f.maxY - contentHeight - topGap
+        }
+        let yFromTop = preferences.notchAnchorYFromTop
+        let pillTop = f.maxY - yFromTop
+        let minY = f.minY  // pill bottom can't go below screen
+        let maxY = f.maxY - contentHeight  // pill top can't go above screen top
+        return min(max(pillTop - contentHeight, minY), maxY)
+    }
+
+    /// Convert a 0…1 anchor fraction into the window's left edge in
+    /// screen coords for content of the given width. We clamp so the
+    /// content never falls off either edge of the screen — important
+    /// for the 560-wide expanded panel on narrow displays.
     private func horizontalOrigin(
-        for position: NotchPosition,
+        forFraction fraction: CGFloat,
         contentWidth: CGFloat,
         on screen: NSScreen
     ) -> CGFloat {
         let f = screen.frame
         let minX = f.minX + Self.edgePadding
         let maxX = f.maxX - contentWidth - Self.edgePadding
-        switch position {
-        case .topLeft:
-            return minX
-        case .topRight:
-            return maxX
-        default:
-            let center = f.minX + f.width * position.horizontalAnchor
-            let raw = center - contentWidth / 2
-            return min(max(raw, minX), maxX)
-        }
+        let placeableRange = max(0, maxX - minX)
+        let clamped = min(max(fraction, 0), 1)
+        return minX + clamped * placeableRange
+    }
+
+    /// True when the user has the pill anchored exactly at top-center
+    /// on a screen with a hardware notch — the only configuration in
+    /// which we render the notch silhouette and skip the top breathing
+    /// gap. Free-positioning mode (`pinToTopEdge = false`) disqualifies
+    /// silhouette since the pill could be anywhere on the screen.
+    private func isHardwareNotchAnchored(on screen: NSScreen) -> Bool {
+        guard preferences.pinToTopEdge else { return false }
+        guard screen.safeAreaInsets.top > 0 else { return false }
+        return abs(preferences.notchAnchorFraction - 0.5) < 0.001
     }
 
     /// Floating positions get a small gap from the top of the screen.
-    /// `topCenter` on a notched screen stays flush so the pill keeps
-    /// flowing seamlessly out of the hardware notch.
+    /// The hardware-notch anchor stays flush so the pill keeps flowing
+    /// seamlessly out of the cutout.
     private func topGapForCurrentState(on screen: NSScreen) -> CGFloat {
-        let isHardwareNotchSlot =
-            preferences.notchPosition == .topCenter
-            && screen.safeAreaInsets.top > 0
-        return isHardwareNotchSlot ? 0 : Self.floatingTopGap
+        isHardwareNotchAnchored(on: screen) ? 0 : Self.floatingTopGap
     }
 
     /// Pulls the CG display ID off an NSScreen. Used to remember which
@@ -316,7 +365,7 @@ final class NotchWindow: NSPanel {
         let h = lastCollapsedSize.height > 0 ? lastCollapsedSize.height : notchHeight
         let pillWidth = lastCollapsedSize.width > 0 ? lastCollapsedSize.width : notchWidth
         let x: CGFloat
-        if preferences.notchPosition == .topCenter {
+        if isHardwareNotchAnchored(on: currentScreen) {
             x = f.midX - pillWidth / 2 + lastPillOffsetX
         } else {
             x = f.minX
@@ -328,6 +377,7 @@ final class NotchWindow: NSPanel {
     /// Called from prefs / screen-change observers.
     private func repositionForCurrentState() {
         guard !isUserDragging else { return }
+        guard !suppressPrefsReposition else { return }
         let target: NSRect
         if isExpanded {
             target = expandedFrame()
@@ -393,7 +443,7 @@ final class NotchWindow: NSPanel {
             if isUserDragging {
                 isUserDragging = false
                 snapPreview.hide()
-                snapToNearestZone(at: NSEvent.mouseLocation)
+                snapToReleaseLocation()
                 return
             }
             super.sendEvent(event)
@@ -402,60 +452,157 @@ final class NotchWindow: NSPanel {
         }
     }
 
-    /// Pick the snap zone closest to where the user released. The
-    /// cursor's screen is split into 5 equal-width strips, one per
-    /// zone. Updates prefs, which fires the observer that animates the
-    /// window to its new resting place.
-    private func snapToNearestZone(at cursor: NSPoint) {
-        let (zone, screen) = nearestSnap(at: cursor)
+    /// Distance (in points) within which the pill snaps to a magnet
+    /// anchor. Outside this radius the user's drop location is
+    /// honored verbatim — free positioning anywhere along the top.
+    private static let snapMagnetRadius: CGFloat = 80
+
+    /// Compute where the pill currently sits in fractional terms
+    /// (based on the actual window frame), then either magnetize to
+    /// one of {0.0, 0.5, 1.0} when close enough or honor the drop
+    /// location. When `pinToTopEdge` is off, also persist the
+    /// vertical drop position so the pill stays where the user left
+    /// it on the next launch.
+    private func snapToReleaseLocation() {
+        let frame = self.frame
+        let pillCenter = NSPoint(x: frame.midX, y: frame.midY)
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(pillCenter) })
+            ?? currentScreen
+        let f = screen.frame
+        let pillWidth = lastCollapsedSize.width > 0 ? lastCollapsedSize.width : frame.width
+        let minPillCenter = f.minX + Self.edgePadding + pillWidth / 2
+        let maxPillCenter = f.maxX - Self.edgePadding - pillWidth / 2
+        let range = max(1, maxPillCenter - minPillCenter)
+        let rawFraction = (frame.midX - minPillCenter) / range
+        var snapped = min(max(rawFraction, 0), 1)
+
+        // Magnetic snap — only when pinned to the top edge. In free
+        // mode the user wants the pill exactly where they dropped it,
+        // not pulled toward an anchor.
+        if preferences.pinToTopEdge {
+            var bestDistance: CGFloat = .greatestFiniteMagnitude
+            for anchor in NotchSnapAnchor.allCases {
+                let anchorCenter = minPillCenter + anchor.fraction * range
+                let distance = abs(frame.midX - anchorCenter)
+                if distance < Self.snapMagnetRadius && distance < bestDistance {
+                    bestDistance = distance
+                    snapped = anchor.fraction
+                }
+            }
+        }
+
+        // Apply all prefs in a single batch so only one reposition
+        // fires at the end — otherwise the pill briefly animates to
+        // wherever (old yFromTop, new fraction) lands before the
+        // second observer correction comes in.
+        suppressPrefsReposition = true
         if let id = Self.displayID(of: screen) {
             preferences.notchScreenID = id
         }
-        preferences.notchPosition = zone
+        if !preferences.pinToTopEdge {
+            let pillTop = frame.origin.y + frame.height
+            let yFromTop = max(0, f.maxY - pillTop)
+            preferences.notchAnchorYFromTop = yFromTop
+        }
+        preferences.notchAnchorFraction = snapped
+        suppressPrefsReposition = false
+        repositionForCurrentState()
     }
 
-    /// Resolve which (screen, zone) the cursor is currently nearest to.
-    /// Used by both the live preview during drag and the final snap.
-    private func nearestSnap(at cursor: NSPoint) -> (NotchPosition, NSScreen) {
-        let screen = NSScreen.screens.first(where: { $0.frame.contains(cursor) })
-            ?? currentScreen
-        let f = screen.frame
-        let relX = cursor.x - f.minX
-        let bucket = max(0, min(4, Int(relX / (f.width / 5))))
-        let zones: [NotchPosition] = [
-            .topLeft, .topMidLeft, .topCenter, .topMidRight, .topRight,
-        ]
-        return (zones[bucket], screen)
-    }
-
-    /// Where the pill would land for a given (zone, screen). Mirrors
-    /// the math in `collapsedFrame` but for an arbitrary zone, and
-    /// uses the actual pill width (not the 560-wide topCenter window)
-    /// so the preview matches what the user will visually see.
-    private func snapPreviewRect(for position: NotchPosition, on screen: NSScreen) -> CGRect {
+    /// Where the pill would land for a given fraction on a screen.
+    /// Used by the live snap preview while dragging.
+    private func snapPreviewRect(forFraction fraction: CGFloat, on screen: NSScreen) -> CGRect {
         let f = screen.frame
         let pillWidth = lastCollapsedSize.width > 0 ? lastCollapsedSize.width : notchWidth
         let pillHeight = lastCollapsedSize.height > 0 ? lastCollapsedSize.height : notchHeight
-        let topGap: CGFloat = (
-            position == .topCenter && screen.safeAreaInsets.top > 0
-        ) ? 0 : Self.floatingTopGap
-        let x: CGFloat
-        if position == .topCenter {
-            x = f.midX - pillWidth / 2
-        } else {
-            x = horizontalOrigin(for: position, contentWidth: pillWidth, on: screen)
-        }
+        let isCenterMagnet = abs(fraction - 0.5) < 0.001
+        let topGap: CGFloat = (isCenterMagnet && screen.safeAreaInsets.top > 0)
+            ? 0 : Self.floatingTopGap
+        let x = horizontalOrigin(forFraction: fraction, contentWidth: pillWidth, on: screen)
         return CGRect(x: x, y: f.maxY - pillHeight - topGap, width: pillWidth, height: pillHeight)
     }
 
+    /// Returns the magnet anchor + screen the cursor is currently
+    /// hovering near, or `nil` if it's outside every magnet's pull
+    /// radius. Used to decide whether to draw the snap preview. When
+    /// the user has free positioning enabled (`pinToTopEdge = false`),
+    /// the magnets are disabled entirely.
+    private func nearestMagnet(at cursor: NSPoint) -> (CGFloat, NSScreen)? {
+        guard preferences.pinToTopEdge else { return nil }
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(cursor) })
+            ?? currentScreen
+        let f = screen.frame
+        let pillWidth = lastCollapsedSize.width > 0 ? lastCollapsedSize.width : notchWidth
+        let minPillCenter = f.minX + Self.edgePadding + pillWidth / 2
+        let maxPillCenter = f.maxX - Self.edgePadding - pillWidth / 2
+        let range = max(1, maxPillCenter - minPillCenter)
+        var bestAnchor: CGFloat?
+        var bestDistance: CGFloat = .greatestFiniteMagnitude
+        for anchor in NotchSnapAnchor.allCases {
+            let anchorCenter = minPillCenter + anchor.fraction * range
+            let distance = abs(cursor.x - anchorCenter)
+            if distance < Self.snapMagnetRadius && distance < bestDistance {
+                bestDistance = distance
+                bestAnchor = anchor.fraction
+            }
+        }
+        guard let anchor = bestAnchor else { return nil }
+        return (anchor, screen)
+    }
+
+    /// Where the pill will land if released right now and how to
+    /// style the preview. Magnet rect + `.magnetActive` if the cursor
+    /// is in a magnet's pull radius (only while pinned to the top
+    /// edge), otherwise a free-drop rect that mirrors the pill's
+    /// current x and — when pinned — projects to the top edge.
+    private func snapPreviewTarget(at cursor: NSPoint) -> (CGRect, SnapPreviewWindow.Style) {
+        if let (fraction, screen) = nearestMagnet(at: cursor) {
+            return (snapPreviewRect(forFraction: fraction, on: screen), .magnetActive)
+        }
+        let pillCenterX = self.frame.midX
+        let screen = NSScreen.screens.first(where: {
+            $0.frame.contains(NSPoint(x: pillCenterX, y: self.frame.midY))
+        })
+            ?? NSScreen.screens.first(where: { $0.frame.contains(cursor) })
+            ?? currentScreen
+        let f = screen.frame
+        let pillWidth = lastCollapsedSize.width > 0 ? lastCollapsedSize.width : notchWidth
+        let pillHeight = lastCollapsedSize.height > 0 ? lastCollapsedSize.height : notchHeight
+        let minPillCenter = f.minX + Self.edgePadding + pillWidth / 2
+        let maxPillCenter = f.maxX - Self.edgePadding - pillWidth / 2
+        let clampedCenter = min(max(pillCenterX, minPillCenter), maxPillCenter)
+        let landingX = clampedCenter - pillWidth / 2
+        let landingY: CGFloat
+        if preferences.pinToTopEdge {
+            // Always show where it'll snap up to on the top edge.
+            landingY = f.maxY - pillHeight - Self.floatingTopGap
+        } else {
+            // Free positioning: the pill's top edge lands at the
+            // dragged window's top edge (matches what
+            // snapToReleaseLocation saves), so the preview's top has
+            // to align with the window's top — not the window's
+            // bottom, which would push the ghost below the pill area
+            // when dragging while expanded.
+            let windowTop = self.frame.origin.y + self.frame.height
+            let raw = windowTop - pillHeight
+            landingY = min(max(raw, f.minY), f.maxY - pillHeight)
+        }
+        let rect = CGRect(x: landingX, y: landingY, width: pillWidth, height: pillHeight)
+        return (rect, .freeDrop)
+    }
+
     private func showSnapPreview(at cursor: NSPoint) {
-        let (zone, screen) = nearestSnap(at: cursor)
-        snapPreview.show(at: snapPreviewRect(for: zone, on: screen))
+        let (target, style) = snapPreviewTarget(at: cursor)
+        snapPreview.show(at: target, style: style)
     }
 
     private func updateSnapPreview(at cursor: NSPoint) {
-        let (zone, screen) = nearestSnap(at: cursor)
-        snapPreview.move(to: snapPreviewRect(for: zone, on: screen))
+        let (target, style) = snapPreviewTarget(at: cursor)
+        if snapPreview.isVisible {
+            snapPreview.move(to: target, style: style)
+        } else {
+            snapPreview.show(at: target, style: style)
+        }
     }
 
     // MARK: - State callbacks
@@ -582,12 +729,20 @@ final class ClickThroughHostingView<Content: View>: NSView {
 /// Translucent ghost shown at the live snap target while the user is
 /// dragging the notch. Lives at the same window level as `NotchWindow`,
 /// ignores all mouse events (so the drag stays uninterrupted), and
-/// fades in/out around show/hide.
+/// fades in/out around show/hide. Has two visual states — a subtle
+/// free-drop look and a more prominent "magnet locked" look so the
+/// user can tell at a glance whether they're about to snap.
 final class SnapPreviewWindow: NSPanel {
+    enum Style {
+        case freeDrop
+        case magnetActive
+    }
+
     private let hosting: NSHostingView<SnapPreviewView>
+    private var currentStyle: Style = .freeDrop
 
     init() {
-        let view = SnapPreviewView()
+        let view = SnapPreviewView(style: .freeDrop)
         let host = NSHostingView(rootView: view)
         self.hosting = host
         super.init(
@@ -610,7 +765,8 @@ final class SnapPreviewWindow: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
-    func show(at rect: CGRect) {
+    func show(at rect: CGRect, style: Style) {
+        applyStyle(style)
         self.setFrame(rect, display: true)
         if !self.isVisible {
             self.orderFrontRegardless()
@@ -622,14 +778,11 @@ final class SnapPreviewWindow: NSPanel {
         }
     }
 
-    func move(to rect: CGRect) {
-        // Animate the frame so zone-to-zone jumps glide instead of
-        // teleporting — much easier to read at a glance.
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.18
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            self.animator().setFrame(rect, display: true)
-        }
+    func move(to rect: CGRect, style: Style) {
+        applyStyle(style)
+        // No animation — the user is dragging in real time and any
+        // smoothing reads as input lag.
+        self.setFrame(rect, display: true)
     }
 
     func hide() {
@@ -640,15 +793,33 @@ final class SnapPreviewWindow: NSPanel {
             self?.orderOut(nil)
         })
     }
+
+    private func applyStyle(_ style: Style) {
+        guard style != currentStyle else { return }
+        currentStyle = style
+        hosting.rootView = SnapPreviewView(style: style)
+    }
 }
 
 private struct SnapPreviewView: View {
+    let style: SnapPreviewWindow.Style
+
     var body: some View {
         RoundedRectangle(cornerRadius: 14, style: .continuous)
-            .fill(Color.white.opacity(0.10))
+            .fill(Color.white.opacity(fillOpacity))
             .overlay(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.45), lineWidth: 1.5)
+                    .strokeBorder(Color.white.opacity(strokeOpacity), lineWidth: strokeWidth)
             )
+    }
+
+    private var fillOpacity: Double {
+        style == .magnetActive ? 0.28 : 0.10
+    }
+    private var strokeOpacity: Double {
+        style == .magnetActive ? 0.85 : 0.40
+    }
+    private var strokeWidth: CGFloat {
+        style == .magnetActive ? 2.0 : 1.0
     }
 }

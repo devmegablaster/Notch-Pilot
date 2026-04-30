@@ -268,7 +268,12 @@ struct NotchContentView: View {
     /// doesn't flip when the user moves keyboard focus to a different
     /// display.
     private var useNotchSilhouette: Bool {
-        guard prefs.notchPosition == .topCenter else { return false }
+        // Free positioning never uses the silhouette — the pill could
+        // be anywhere on screen, far away from the hardware cutout.
+        guard prefs.pinToTopEdge else { return false }
+        // Within a hair of dead-center? Otherwise the pill is anchored
+        // somewhere else and we render as a floating chip.
+        guard abs(prefs.notchAnchorFraction - 0.5) < 0.001 else { return false }
         let screen = NotchWindow.resolveScreen(savedID: prefs.notchScreenID)
         return screen.safeAreaInsets.top > 0
     }
@@ -3133,9 +3138,10 @@ struct NotchContentView: View {
         .disabled(dimmed)
     }
 
-    /// Settings entry for the draggable notch. The notch is moved by
-    /// dragging it; this row just shows where it is and offers a one-tap
-    /// reset to the original top-center / primary-screen position.
+    /// Settings entry for the draggable notch. Shows the current
+    /// drag-mode hint with a one-tap reset, and a sibling toggle that
+    /// flips between top-edge constraint and full free positioning.
+    @ViewBuilder
     private var positionRow: some View {
         HStack(spacing: 10) {
             Image(systemName: "arrow.up.left.and.arrow.down.right")
@@ -3147,7 +3153,9 @@ struct NotchContentView: View {
                 Text("Notch position")
                     .font(.system(size: 12, weight: .medium, design: .rounded))
                     .foregroundColor(.white.opacity(0.9))
-                Text("Drag the notch to any top corner · currently \(prefs.notchPosition.label.lowercased())")
+                Text(prefs.pinToTopEdge
+                     ? "Drag along the top · magnetic snap at the edges and center"
+                     : "Drag anywhere on screen · magnets are off in free mode")
                     .font(.system(size: 10, design: .rounded))
                     .foregroundColor(.white.opacity(0.45))
             }
@@ -3155,7 +3163,8 @@ struct NotchContentView: View {
             Spacer()
 
             Button {
-                prefs.notchPosition = .topCenter
+                prefs.notchAnchorFraction = 0.5
+                prefs.notchAnchorYFromTop = 0
                 prefs.notchScreenID = nil
             } label: {
                 Text("Reset")
@@ -3169,8 +3178,20 @@ struct NotchContentView: View {
                     )
             }
             .buttonStyle(.plain)
-            .disabled(prefs.notchPosition == .topCenter && prefs.notchScreenID == nil)
+            .disabled(
+                abs(prefs.notchAnchorFraction - 0.5) < 0.001
+                && prefs.notchAnchorYFromTop == 0
+                && prefs.notchScreenID == nil
+            )
         }
+
+        behaviorRow(
+            iconOn: "arrow.up.to.line.compact",
+            iconOff: "move.3d",
+            title: "Pin to top edge",
+            subtitle: "When off, drop the notch anywhere on the screen",
+            isOn: $prefs.pinToTopEdge
+        )
     }
 
     @ViewBuilder
