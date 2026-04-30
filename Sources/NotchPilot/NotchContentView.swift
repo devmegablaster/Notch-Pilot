@@ -19,6 +19,11 @@ struct NotchContentView: View {
     var onVisibilityChange: (Bool) -> Void
     var onCollapsedSizeChange: (CGSize) -> Void
     var onExpandedChange: (Bool) -> Void
+    /// Horizontal pixel offset the SwiftUI pill is rendered with
+    /// (used in silhouette mode when left/right slot widths differ).
+    /// NotchWindow uses this to align its click hit-region and the
+    /// MouseMonitor's hover rect with the visible pill.
+    var onCollapsedOffsetChange: (CGFloat) -> Void
 
     @State private var expanded = false
     @State private var collapseTask: Task<Void, Never>?
@@ -308,6 +313,25 @@ struct NotchContentView: View {
     }
 
     private func slotWidth(_ item: NotchSlotItem, position: SlotPosition) -> CGFloat {
+        naturalSlotWidth(item, position: position)
+    }
+
+    /// In silhouette mode the SwiftUI center slot has to land directly
+    /// under the hardware notch cutout. The pill is centered as a
+    /// whole by default, so when the left and right slots have
+    /// different widths the center slot drifts off-axis and the wider
+    /// side gets clipped by the notch. We compensate by offsetting the
+    /// entire pill horizontally — content stays compact, and the
+    /// callback propagates the offset to NotchWindow so the click
+    /// hit-region tracks the visible pill.
+    private var pillOffsetX: CGFloat {
+        guard useNotchSilhouette else { return 0 }
+        let l = naturalSlotWidth(prefs.notchLeftSlot, position: .left)
+        let r = naturalSlotWidth(prefs.notchRightSlot, position: .right)
+        return (r - l) / 2
+    }
+
+    private func naturalSlotWidth(_ item: NotchSlotItem, position: SlotPosition) -> CGFloat {
         switch item {
         case .buddy: return Self.buddySlotWidth
         case .status: return rightSectionWidth
@@ -457,6 +481,9 @@ struct NotchContentView: View {
         }
         .onChange(of: collapsedSize) { _, newSize in
             onCollapsedSizeChange(newSize)
+        }
+        .onChange(of: pillOffsetX, initial: true) { _, newOffset in
+            onCollapsedOffsetChange(newOffset)
         }
         .onChange(of: hookBridge.pendingPermission?.id) { oldID, newID in
             if oldID != nil && newID == nil {
@@ -857,6 +884,7 @@ struct NotchContentView: View {
         .contextMenu {
             Button("Quit Notch Pilot") { NSApp.terminate(nil) }
         }
+        .offset(x: pillOffsetX)
     }
 
     // MARK: - Expanded panel

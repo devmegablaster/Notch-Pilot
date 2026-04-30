@@ -25,6 +25,11 @@ final class NotchWindow: NSPanel {
     // the window can follow width and height changes — width for
     // status-text length, height for the speech pop-out.
     private var lastCollapsedSize: CGSize = .zero
+    /// Horizontal offset the SwiftUI pill is currently rendering at
+    /// (used in silhouette mode when left/right slot widths differ).
+    /// Click hit-region and hover rect both shift with this so they
+    /// track the visible pill instead of its centered default.
+    private var lastPillOffsetX: CGFloat = 0
     /// Tracks whether the panel is currently in expanded-frame mode.
     /// Used to no-op `updateCollapsed` while expanded so the SwiftUI
     /// re-render that fires both onChange(of:collapsedSize) and
@@ -142,6 +147,9 @@ final class NotchWindow: NSPanel {
             },
             onExpandedChange: { [weak self] expanded in
                 self?.updateExpanded(expanded)
+            },
+            onCollapsedOffsetChange: { [weak self] offset in
+                self?.updatePillOffset(offset)
             }
         )
         .environmentObject(preferences)
@@ -300,16 +308,16 @@ final class NotchWindow: NSPanel {
 
     /// The pill's actual rect on screen — used by `MouseMonitor` to size
     /// the hover hit area. In `topCenter` the pill is narrower than the
-    /// 560-wide window (centered inside it); in every other zone the
-    /// window already matches the pill, so we just use the window left
-    /// edge.
+    /// 560-wide window (centered inside it, plus any silhouette offset);
+    /// in every other zone the window already matches the pill, so we
+    /// just use the window left edge.
     var currentPillRect: CGRect {
         let f = self.frame
         let h = lastCollapsedSize.height > 0 ? lastCollapsedSize.height : notchHeight
         let pillWidth = lastCollapsedSize.width > 0 ? lastCollapsedSize.width : notchWidth
         let x: CGFloat
         if preferences.notchPosition == .topCenter {
-            x = f.midX - pillWidth / 2
+            x = f.midX - pillWidth / 2 + lastPillOffsetX
         } else {
             x = f.minX
         }
@@ -482,7 +490,7 @@ final class NotchWindow: NSPanel {
             ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
             self.animator().setFrame(target, display: true)
         }
-        clickHost.hitShape = .centered(width: size.width)
+        clickHost.hitShape = .centered(width: size.width, offsetX: lastPillOffsetX)
     }
 
     private func updateExpanded(_ expanded: Bool) {
@@ -495,7 +503,21 @@ final class NotchWindow: NSPanel {
         }
         clickHost.hitShape = expanded
             ? .full
-            : .centered(width: lastCollapsedSize.width)
+            : .centered(width: lastCollapsedSize.width, offsetX: lastPillOffsetX)
+    }
+
+    /// Track the SwiftUI pill's horizontal offset so the click hit
+    /// region and hover anchor follow whatever silhouette-alignment
+    /// shift the content view is applying.
+    private func updatePillOffset(_ offset: CGFloat) {
+        guard offset != lastPillOffsetX else { return }
+        lastPillOffsetX = offset
+        if !isExpanded {
+            clickHost.hitShape = .centered(
+                width: lastCollapsedSize.width,
+                offsetX: offset
+            )
+        }
     }
 }
 
@@ -514,8 +536,10 @@ final class ClickThroughHostingView<Content: View>: NSView {
         /// Expanded panel fills the window — absorb every click.
         case full
         /// Collapsed pill: horizontal strip of the given width,
-        /// centered in the window, full current height.
-        case centered(width: CGFloat)
+        /// centered in the window plus an optional `offsetX` so the
+        /// hit region tracks the pill when SwiftUI shifts it (e.g.
+        /// silhouette mode with asymmetric slot widths).
+        case centered(width: CGFloat, offsetX: CGFloat = 0)
     }
 
     let hosting: NSHostingView<Content>
@@ -542,9 +566,9 @@ final class ClickThroughHostingView<Content: View>: NSView {
             return nil
         case .full:
             region = bounds
-        case .centered(let width):
+        case .centered(let width, let offsetX):
             region = CGRect(
-                x: (bounds.width - width) / 2,
+                x: (bounds.width - width) / 2 + offsetX,
                 y: 0,
                 width: width,
                 height: bounds.height
